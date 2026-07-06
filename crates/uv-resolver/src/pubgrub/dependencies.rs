@@ -128,7 +128,11 @@ impl PubGrubDependency {
             Some(Self {
                 package,
                 version,
-                parent: None,
+                parent: if is_normal_parent {
+                    parent_name.cloned()
+                } else {
+                    None
+                },
                 source,
             })
         } else {
@@ -229,7 +233,11 @@ impl PubGrubDependency {
                     PubGrubPackageInner::Extras { .. } => Self {
                         package,
                         version,
-                        parent: None,
+                        parent: if is_normal_parent {
+                            parent_name.cloned()
+                        } else {
+                            None
+                        },
                         source,
                     },
                     PubGrubPackageInner::Group { name, .. } => {
@@ -263,6 +271,45 @@ impl PubGrubDependency {
     /// returns `None`.
     pub(crate) fn conflicting_item(&self) -> Option<ConflictItemRef<'_>> {
         self.package.conflicting_item()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::str::FromStr;
+
+    use uv_distribution_types::Requirement;
+    use uv_normalize::PackageName;
+    use uv_pep508::MarkerTree;
+    use uv_pypi_types::Conflicts;
+
+    use crate::pubgrub::{PubGrubDependency, PubGrubPackage, PubGrubPackageInner};
+
+    #[test]
+    fn combined_extras_preserve_normal_parent() {
+        let requirement = Requirement::from(
+            uv_pep508::Requirement::from_str("target[a,b]>=1")
+                .expect("valid requirement with extras"),
+        );
+        let parent_name = PackageName::from_str("parent").expect("valid package name");
+        let parent =
+            PubGrubPackage::from_package(parent_name.clone(), None, None, MarkerTree::TRUE);
+
+        let dependencies = PubGrubDependency::from_requirement(
+            &Conflicts::empty(),
+            Cow::Owned(requirement),
+            None,
+            Some(&parent),
+        )
+        .collect::<Vec<_>>();
+
+        let combined_extras = dependencies
+            .iter()
+            .find(|dependency| matches!(&*dependency.package, PubGrubPackageInner::Extras { .. }))
+            .expect("combined extras dependency");
+
+        assert_eq!(combined_extras.parent.as_ref(), Some(&parent_name));
     }
 }
 

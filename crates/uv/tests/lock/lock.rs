@@ -4537,7 +4537,7 @@ fn lock_conflicting_workspace_members_depends_transitive_extra() -> Result<()> {
 
         [package.optional-dependencies]
         foo = [
-            { name = "subexample", marker = "extra == 'project-10-subexample'" },
+            { name = "subexample", marker = "(extra == 'foo' and extra == 'project-10-subexample') or (extra == 'project-10-subexample' and extra == 'project-7-example')" },
         ]
 
         [package.metadata]
@@ -4607,6 +4607,101 @@ fn lock_conflicting_workspace_members_depends_transitive_extra() -> Result<()> {
     Installed 2 packages in [TIME]
      + sortedcontainers==2.4.0
      + subexample==0.1.0 (from file://[TEMP_DIR]/subexample)
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn lock_conflicting_workspace_members_depends_transitive_combined_extra() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let pyproject_toml = context.temp_dir.child("pyproject.toml");
+    pyproject_toml.write_str(
+        r#"
+        [project]
+        name = "example"
+        version = "0.1.0"
+        requires-python = ">=3.12"
+        dependencies = ["sortedcontainers==2.3.0", "indirection[bar,foo]"]
+
+        [tool.uv.workspace]
+        members = ["indirection", "subexample"]
+
+        [tool.uv]
+        conflicts = [
+          [
+            { package = "example" },
+            { package = "indirection" },
+          ],
+        ]
+
+        [tool.uv.sources]
+        indirection = { workspace = true }
+        subexample = { workspace = true }
+
+        [build-system]
+        requires = ["setuptools>=42"]
+        build-backend = "setuptools.build_meta"
+
+        [tool.setuptools.packages.find]
+        include = ["example"]
+        "#,
+    )?;
+
+    let subproject_dir = context.temp_dir.child("indirection");
+    subproject_dir.create_dir_all()?;
+
+    let sub_pyproject_toml = subproject_dir.child("pyproject.toml");
+    sub_pyproject_toml.write_str(
+        r#"
+        [project]
+        name = "indirection"
+        version = "0.1.0"
+        requires-python = ">=3.12"
+        dependencies = ["subexample ; extra == 'bar' and extra == 'foo'"]
+
+        [project.optional-dependencies]
+        bar = []
+        foo = []
+
+        [tool.uv.sources]
+        subexample = { workspace = true }
+
+        [build-system]
+        requires = ["setuptools>=42"]
+        build-backend = "setuptools.build_meta"
+        "#,
+    )?;
+
+    let subproject_dir = context.temp_dir.child("subexample");
+    subproject_dir.create_dir_all()?;
+
+    let sub_pyproject_toml = subproject_dir.child("pyproject.toml");
+    sub_pyproject_toml.write_str(
+        r#"
+        [project]
+        name = "subexample"
+        version = "0.1.0"
+        requires-python = ">=3.12"
+        dependencies = ["sortedcontainers==2.4.0"]
+
+        [build-system]
+        requires = ["setuptools>=42"]
+        build-backend = "setuptools.build_meta"
+        "#,
+    )?;
+
+    uv_snapshot!(context.filters(), context.lock(), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+
+    ----- stderr -----
+    warning: Declaring conflicts for packages (`package = ...`) is experimental and may change without warning. Pass `--preview-features package-conflicts` to disable this warning.
+      × No solution found when resolving dependencies for split (included: example; excluded: indirection):
+      ╰─▶ Because example depends on sortedcontainers==2.3.0 and subexample depends on sortedcontainers==2.4.0, we can conclude that example and subexample are incompatible.
+          And because your workspace requires example and subexample, we can conclude that your workspace's requirements are unsatisfiable.
     ");
 
     Ok(())
