@@ -10708,8 +10708,6 @@ fn sync_extra_marker_conjunction() -> Result<()> {
     )?;
     something.child("src/something/__init__.py").touch()?;
 
-    // uv splits `project[this,that]` into the base package and the individual extra packages, so
-    // there is no combined extra context in which this marker can evaluate to true.
     uv_snapshot!(context.filters(), context.sync().arg("--extra").arg("this").arg("--extra").arg("that"), @"
     success: true
     exit_code: 0
@@ -10717,11 +10715,12 @@ fn sync_extra_marker_conjunction() -> Result<()> {
 
     ----- stderr -----
     Resolved 4 packages in [TIME]
-    Prepared 3 packages in [TIME]
-    Installed 3 packages in [TIME]
+    Prepared 4 packages in [TIME]
+    Installed 4 packages in [TIME]
      + extra-that==1.0.0 (from file://[TEMP_DIR]/extra_that)
      + extra-this==1.0.0 (from file://[TEMP_DIR]/extra_this)
      + project==1.0.0 (from file://[TEMP_DIR]/)
+     + something==1.0.0 (from file://[TEMP_DIR]/something)
     ");
 
     Ok(())

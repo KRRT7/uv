@@ -1141,6 +1141,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
 
             PubGrubPackageInner::Marker { name, .. }
             | PubGrubPackageInner::Extra { name, .. }
+            | PubGrubPackageInner::Extras { name, .. }
             | PubGrubPackageInner::Group { name, .. }
             | PubGrubPackageInner::Package { name, .. } => {
                 if let Some(url) = package.name().and_then(|name| fork_urls.get(name)) {
@@ -1973,6 +1974,77 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                     .collect()
             }
 
+            PubGrubPackageInner::Extras {
+                name,
+                extras,
+                marker: _,
+            } => {
+                // Look up the distribution ID from the pins (common case) or fork URLs.
+                let owned_id;
+                let distribution_id = if let Some((_, metadata_id)) =
+                    pins.dist_and_id(name, version)
+                {
+                    metadata_id
+                } else if let Some(url) = fork_urls.get(name) {
+                    let dist = Dist::from_url(name.clone(), url.clone())?;
+                    owned_id = dist.distribution_id();
+                    &owned_id
+                } else {
+                    debug_assert!(
+                        false,
+                        "Dependencies were requested for a package without a pinned distribution"
+                    );
+                    return Err(ResolveError::UnregisteredTask(format!("{name}=={version}")));
+                };
+
+                let response = self
+                    .index
+                    .distributions()
+                    .wait_blocking(distribution_id)
+                    .map_err(|_| ResolveError::UnregisteredTask(format!("{name}=={version}")))?;
+
+                let metadata = match &*response {
+                    MetadataResponse::Found(archive) => &archive.metadata,
+                    MetadataResponse::Unavailable(reason) => {
+                        let unavailable_version = UnavailableVersion::from(reason);
+                        warn!("{name} {}", unavailable_version.singular_message());
+                        return Ok(Dependencies::Unavailable(unavailable_version));
+                    }
+                    MetadataResponse::Error(dist, err) => {
+                        let chain = DerivationChainBuilder::from_state(id, version, pubgrub)
+                            .unwrap_or_default();
+                        return Err(ResolveError::Dist(
+                            DistErrorKind::from_requested_dist(dist, &**err),
+                            dist.clone(),
+                            chain,
+                            err.clone(),
+                        ));
+                    }
+                };
+
+                let python_marker = python_requirement.to_marker_tree();
+                let requirements = self.requirements_for_extras(
+                    metadata.requires_dist.iter(),
+                    extras,
+                    Some((name, version)),
+                    Some((name, version)),
+                    env,
+                    python_marker,
+                    python_requirement,
+                );
+
+                let package_dependencies = requirements.flat_map(|requirement| {
+                    PubGrubDependency::from_requirement(
+                        &self.conflicts,
+                        requirement,
+                        None,
+                        Some(package),
+                    )
+                });
+
+                package_dependencies.collect()
+            }
+
             PubGrubPackageInner::Python(_) => return Ok(Dependencies::Unforkable(Vec::default())),
 
             PubGrubPackageInner::System(_) => return Ok(Dependencies::Unforkable(Vec::default())),
@@ -2228,6 +2300,46 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                     python_marker,
                     python_requirement,
                 ))
+            })
+    }
+
+    fn requirements_for_extras<'data, 'parameters>(
+        &'data self,
+        dependencies: impl IntoIterator<Item = &'data Requirement> + 'parameters,
+        extras: &'parameters [ExtraName],
+        override_package: Option<(&'parameters PackageName, &'parameters Version)>,
+        exclusion_package: Option<(&'parameters PackageName, &'parameters Version)>,
+        env: &'parameters ResolverEnvironment,
+        python_marker: MarkerTree,
+        python_requirement: &'parameters PythonRequirement,
+    ) -> impl Iterator<Item = Cow<'data, Requirement>> + 'parameters
+    where
+        'data: 'parameters,
+    {
+        self.overrides
+            .apply_for_package(override_package, dependencies)
+            .filter(move |requirement| {
+                !self
+                    .excludes
+                    .contains_for_package(exclusion_package, &requirement.name)
+            })
+            .filter(move |requirement| {
+                let marker = requirement.marker.simplify_extra_markers(extras);
+                if !marker.evaluate_optional_environment(env.marker_environment(), &[]) {
+                    return false;
+                }
+                if python_marker.is_disjoint(requirement.marker) {
+                    trace!(
+                        "Skipping {requirement} because of Requires-Python: {requires_python}",
+                        requires_python = python_requirement.target(),
+                    );
+                    return false;
+                }
+                if !env.included_by_marker(requirement.marker) {
+                    trace!("Skipping {requirement} because of {env}");
+                    return false;
+                }
+                true
             })
     }
 
@@ -2920,6 +3032,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                 PubGrubPackageInner::System(_) => {}
                 PubGrubPackageInner::Marker { .. } => {}
                 PubGrubPackageInner::Extra { .. } => {}
+                PubGrubPackageInner::Extras { .. } => {}
                 PubGrubPackageInner::Group { .. } => {}
                 PubGrubPackageInner::Package { name, .. } => {
                     reporter.on_progress(name, &VersionOrUrlRef::Version(version));
@@ -3373,6 +3486,10 @@ impl ForkState {
                         group: self_group,
                         marker: _,
                     } => (Some(self_name), self_extra.as_ref(), self_group.as_ref()),
+
+                    PubGrubPackageInner::Extras {
+                        name: self_name, ..
+                    } => (Some(self_name), None, None),
 
                     PubGrubPackageInner::Root(_) => (None, None, None),
 

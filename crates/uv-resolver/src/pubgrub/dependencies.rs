@@ -118,6 +118,22 @@ impl PubGrubDependency {
         let parent_name = parent_package.and_then(|package| package.name_no_root());
         let is_normal_parent = parent_package
             .is_some_and(|parent| parent.extra().is_none() && parent.group().is_none());
+        let combined_extras = if requirement.extras.len() > 1 {
+            let pubgrub_requirement = PubGrubRequirement::from_requirement_extras(&requirement);
+            let PubGrubRequirement {
+                package,
+                version,
+                source,
+            } = pubgrub_requirement;
+            Some(Self {
+                package,
+                version,
+                parent: None,
+                source,
+            })
+        } else {
+            None
+        };
         let iter = if !requirement.extras.is_empty() {
             // This is crazy subtle, but if any of the extras in the
             // requirement are part of a declared conflict, then we
@@ -165,70 +181,80 @@ impl PubGrubDependency {
         };
 
         // Add the package, plus any extra variants.
-        iter.map(move |(extra, group)| {
-            let pubgrub_requirement =
-                PubGrubRequirement::from_requirement(&requirement, extra, group);
-            let PubGrubRequirement {
-                package,
-                version,
-                source,
-            } = pubgrub_requirement;
-            match &*package {
-                PubGrubPackageInner::Package { .. } => Self {
+        combined_extras
+            .into_iter()
+            .chain(iter.map(move |(extra, group)| {
+                let pubgrub_requirement =
+                    PubGrubRequirement::from_requirement(&requirement, extra, group);
+                let PubGrubRequirement {
                     package,
                     version,
-                    parent: if is_normal_parent {
-                        parent_name.cloned()
-                    } else {
-                        None
-                    },
                     source,
-                },
-                PubGrubPackageInner::Marker { .. } => Self {
-                    package,
-                    version,
-                    parent: if is_normal_parent {
-                        parent_name.cloned()
-                    } else {
-                        None
+                } = pubgrub_requirement;
+                match &*package {
+                    PubGrubPackageInner::Package { .. } => Self {
+                        package,
+                        version,
+                        parent: if is_normal_parent {
+                            parent_name.cloned()
+                        } else {
+                            None
+                        },
+                        source,
                     },
-                    source,
-                },
-                PubGrubPackageInner::Extra { name, .. } => {
-                    if group_name.is_none() {
-                        debug_assert!(
-                            parent_name.is_none_or(|parent_name| parent_name != name),
-                            "extras not flattened for {name}"
-                        );
+                    PubGrubPackageInner::Marker { .. } => Self {
+                        package,
+                        version,
+                        parent: if is_normal_parent {
+                            parent_name.cloned()
+                        } else {
+                            None
+                        },
+                        source,
+                    },
+                    PubGrubPackageInner::Extra { name, .. } => {
+                        if group_name.is_none() {
+                            debug_assert!(
+                                parent_name.is_none_or(|parent_name| parent_name != name),
+                                "extras not flattened for {name}"
+                            );
+                        }
+                        Self {
+                            package,
+                            version,
+                            parent: None,
+                            source,
+                        }
                     }
-                    Self {
+                    PubGrubPackageInner::Extras { .. } => Self {
                         package,
                         version,
                         parent: None,
                         source,
+                    },
+                    PubGrubPackageInner::Group { name, .. } => {
+                        if group_name.is_none() {
+                            debug_assert!(
+                                parent_name.is_none_or(|parent_name| parent_name != name),
+                                "group not flattened for {name}"
+                            );
+                        }
+                        Self {
+                            package,
+                            version,
+                            parent: None,
+                            source,
+                        }
+                    }
+                    PubGrubPackageInner::Root(_) => unreachable!("Root package in dependencies"),
+                    PubGrubPackageInner::Python(_) => {
+                        unreachable!("Python package in dependencies")
+                    }
+                    PubGrubPackageInner::System(_) => {
+                        unreachable!("System package in dependencies")
                     }
                 }
-                PubGrubPackageInner::Group { name, .. } => {
-                    if group_name.is_none() {
-                        debug_assert!(
-                            parent_name.is_none_or(|parent_name| parent_name != name),
-                            "group not flattened for {name}"
-                        );
-                    }
-                    Self {
-                        package,
-                        version,
-                        parent: None,
-                        source,
-                    }
-                }
-                PubGrubPackageInner::Root(_) => unreachable!("Root package in dependencies"),
-                PubGrubPackageInner::Python(_) => {
-                    unreachable!("Python package in dependencies")
-                }
-                PubGrubPackageInner::System(_) => unreachable!("System package in dependencies"),
-            }
-        })
+            }))
     }
 
     /// Extracts a possible conflicting item from this dependency.
@@ -255,6 +281,36 @@ impl PubGrubRequirement {
         group: Option<GroupName>,
     ) -> PubGrubPackage {
         PubGrubPackage::from_package(requirement.name.clone(), extra, group, requirement.marker)
+    }
+
+    fn package_for_requirement_extras(requirement: &Requirement) -> PubGrubPackage {
+        PubGrubPackage::from_package_extras(
+            requirement.name.clone(),
+            requirement.extras.clone(),
+            requirement.marker,
+        )
+    }
+
+    fn from_requirement_extras(requirement: &Requirement) -> Self {
+        let (source, version) = match &requirement.source {
+            RequirementSource::Registry { specifier, .. } => (
+                DependencySource::from_requirement(requirement),
+                Ranges::from(specifier.clone()),
+            ),
+            RequirementSource::Url { .. }
+            | RequirementSource::GitDirectory { .. }
+            | RequirementSource::GitPath { .. }
+            | RequirementSource::Path { .. }
+            | RequirementSource::Directory { .. } => (
+                DependencySource::from_requirement(requirement),
+                Ranges::full(),
+            ),
+        };
+        Self {
+            package: Self::package_for_requirement_extras(requirement),
+            version,
+            source,
+        }
     }
 
     /// Convert a [`Requirement`] to a PubGrub-compatible package and range, while returning the URL

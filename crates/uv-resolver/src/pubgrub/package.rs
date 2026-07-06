@@ -74,6 +74,12 @@ pub enum PubGrubPackageInner {
         extra: ExtraName,
         marker: MarkerTree,
     },
+    /// A proxy package to represent a dependency with multiple extras.
+    Extras {
+        name: PackageName,
+        extras: Box<[ExtraName]>,
+        marker: MarkerTree,
+    },
     /// A proxy package to represent an enabled dependency group.
     ///
     /// This is similar in spirit to [PEP 735](https://peps.python.org/pep-0735/) and similar in
@@ -129,6 +135,18 @@ impl PubGrubPackage {
         }
     }
 
+    pub(crate) fn from_package_extras(
+        name: PackageName,
+        extras: Box<[ExtraName]>,
+        marker: MarkerTree,
+    ) -> Self {
+        Self(Arc::new(PubGrubPackageInner::Extras {
+            name,
+            extras,
+            marker,
+        }))
+    }
+
     /// If this package is a proxy package, return the base package it depends on.
     ///
     /// While dependency groups may be attached to a package, we don't consider them here as
@@ -144,14 +162,14 @@ impl PubGrubPackage {
                 // itself.
                 None
             }
-            PubGrubPackageInner::Extra { name, .. } | PubGrubPackageInner::Marker { name, .. } => {
-                Some(Self::from_package(
-                    name.clone(),
-                    None,
-                    None,
-                    MarkerTree::TRUE,
-                ))
-            }
+            PubGrubPackageInner::Extra { name, .. }
+            | PubGrubPackageInner::Extras { name, .. }
+            | PubGrubPackageInner::Marker { name, .. } => Some(Self::from_package(
+                name.clone(),
+                None,
+                None,
+                MarkerTree::TRUE,
+            )),
         }
     }
 
@@ -165,6 +183,7 @@ impl PubGrubPackage {
             | PubGrubPackageInner::System(name)
             | PubGrubPackageInner::Package { name, .. }
             | PubGrubPackageInner::Extra { name, .. }
+            | PubGrubPackageInner::Extras { name, .. }
             | PubGrubPackageInner::Group { name, .. }
             | PubGrubPackageInner::Marker { name, .. } => Some(name),
         }
@@ -179,6 +198,7 @@ impl PubGrubPackage {
             | PubGrubPackageInner::System(_) => None,
             PubGrubPackageInner::Package { name, .. }
             | PubGrubPackageInner::Extra { name, .. }
+            | PubGrubPackageInner::Extras { name, .. }
             | PubGrubPackageInner::Group { name, .. }
             | PubGrubPackageInner::Marker { name, .. } => Some(name),
         }
@@ -195,6 +215,7 @@ impl PubGrubPackage {
             | PubGrubPackageInner::System(_) => MarkerTree::TRUE,
             PubGrubPackageInner::Package { marker, .. }
             | PubGrubPackageInner::Extra { marker, .. }
+            | PubGrubPackageInner::Extras { marker, .. }
             | PubGrubPackageInner::Group { marker, .. } => *marker,
             PubGrubPackageInner::Marker { marker, .. } => *marker,
         }
@@ -212,6 +233,7 @@ impl PubGrubPackage {
             | PubGrubPackageInner::Python(_)
             | PubGrubPackageInner::System(_)
             | PubGrubPackageInner::Package { extra: None, .. }
+            | PubGrubPackageInner::Extras { .. }
             | PubGrubPackageInner::Group { .. }
             | PubGrubPackageInner::Marker { .. } => None,
             PubGrubPackageInner::Package {
@@ -234,6 +256,7 @@ impl PubGrubPackage {
             | PubGrubPackageInner::System(_)
             | PubGrubPackageInner::Package { group: None, .. }
             | PubGrubPackageInner::Extra { .. }
+            | PubGrubPackageInner::Extras { .. }
             | PubGrubPackageInner::Marker { .. } => None,
             PubGrubPackageInner::Package {
                 group: Some(group), ..
@@ -272,6 +295,7 @@ impl PubGrubPackage {
         matches!(
             &**self,
             PubGrubPackageInner::Extra { .. }
+                | PubGrubPackageInner::Extras { .. }
                 | PubGrubPackageInner::Group { .. }
                 | PubGrubPackageInner::Marker { .. }
         )
@@ -295,6 +319,7 @@ impl PubGrubPackage {
             | PubGrubPackageInner::System(_) => {}
             PubGrubPackageInner::Package { ref mut marker, .. }
             | PubGrubPackageInner::Extra { ref mut marker, .. }
+            | PubGrubPackageInner::Extras { ref mut marker, .. }
             | PubGrubPackageInner::Group { ref mut marker, .. }
             | PubGrubPackageInner::Marker { ref mut marker, .. } => {
                 *marker = python_requirement.simplify_markers(*marker);
@@ -311,6 +336,7 @@ impl PubGrubPackage {
             PubGrubPackageInner::System(_) => "system",
             PubGrubPackageInner::Package { .. } => "package",
             PubGrubPackageInner::Extra { .. } => "extra",
+            PubGrubPackageInner::Extras { .. } => "extras",
             PubGrubPackageInner::Group { .. } => "group",
             PubGrubPackageInner::Marker { .. } => "marker",
         }
@@ -386,6 +412,16 @@ impl std::fmt::Display for PubGrubPackageInner {
                 }
             }
             Self::Extra { name, extra, .. } => write!(f, "{name}[{extra}]"),
+            Self::Extras { name, extras, .. } => {
+                write!(f, "{name}[")?;
+                for (index, extra) in extras.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "{extra}")?;
+                }
+                write!(f, "]")
+            }
             Self::Group {
                 name, group: dev, ..
             } => write!(f, "{name}:{dev}"),
