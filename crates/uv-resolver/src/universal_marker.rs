@@ -288,6 +288,17 @@ impl UniversalMarker {
         self.marker != self.pep508
     }
 
+    /// Returns true if this universal marker contains an unresolved uv-encoded conflict marker.
+    pub(crate) fn has_encoded_conflict_marker(self) -> bool {
+        let mut has_encoded_conflict_marker = false;
+        self.marker.visit_extras(|_, extra| {
+            if ParsedRawExtra::parse(extra).is_ok() {
+                has_encoded_conflict_marker = true;
+            }
+        });
+        has_encoded_conflict_marker
+    }
+
     /// Returns true if this universal marker is disjoint with the one given.
     ///
     /// Two universal markers are disjoint when it is impossible for them both
@@ -1096,7 +1107,15 @@ mod tests {
         let pep508 =
             MarkerTree::from_str("sys_platform == 'darwin'").expect("valid marker expression");
         assert!(!UniversalMarker::from_combined(pep508).has_conflict_marker());
-        assert!(UniversalMarker::new(pep508, create_extra_marker("foo")).has_conflict_marker());
+
+        let package_extra =
+            MarkerTree::from_str("extra == 'format-nongpl'").expect("valid marker expression");
+        assert!(UniversalMarker::from_combined(package_extra).has_conflict_marker());
+        assert!(!UniversalMarker::from_combined(package_extra).has_encoded_conflict_marker());
+
+        let conflict = UniversalMarker::new(pep508, create_extra_marker("foo"));
+        assert!(conflict.has_conflict_marker());
+        assert!(conflict.has_encoded_conflict_marker());
     }
 
     #[test]
