@@ -39,10 +39,10 @@ enum DependencyContext {
 }
 
 impl DependencyContext {
-    fn marker_extras(&self) -> Vec<ExtraName> {
+    fn marker_extras(&self) -> impl Iterator<Item = &ExtraName> {
         match self {
-            Self::Base(extras) => extras.iter().cloned().collect(),
-            Self::Optional(extra) => vec![extra.clone()],
+            Self::Base(extras) => Either::Left(extras.iter()),
+            Self::Optional(extra) => Either::Right(std::iter::once(extra)),
         }
     }
 
@@ -64,7 +64,7 @@ fn evaluate_dependency_marker<'lock>(
 ) -> bool {
     dependency.complexified_marker.evaluate_with_marker_extras(
         marker_env,
-        context.marker_extras().into_iter(),
+        context.marker_extras(),
         activated_projects.iter().copied(),
         activated_extras.iter().copied(),
         activated_groups.iter().copied(),
@@ -374,7 +374,7 @@ trait InstallableExt<'lock>: Installable<'lock> {
                 let additional_activated_extras = newly_activated_extras(dep, &activated_extras);
                 if !dep.complexified_marker.evaluate_with_marker_extras(
                     marker_env,
-                    std::iter::empty(),
+                    std::iter::empty::<&ExtraName>(),
                     activated_projects.iter().copied(),
                     activated_extras
                         .iter()
@@ -612,7 +612,7 @@ trait InstallableExt<'lock>: Installable<'lock> {
                         newly_activated_extras(dep, &activated_extras);
                     if !dep_reachability.evaluate_with_marker_extras(
                         marker_env,
-                        context.marker_extras().into_iter(),
+                        context.marker_extras(),
                         activated_projects.iter().copied(),
                         activated_extras
                             .iter()
