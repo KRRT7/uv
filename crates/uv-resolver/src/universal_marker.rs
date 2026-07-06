@@ -338,10 +338,10 @@ impl UniversalMarker {
     }
 
     /// Evaluate the marker with package-local PEP 508 extras plus uv's encoded conflict markers.
-    pub(crate) fn evaluate_with_marker_extras<'a, P, E, G>(
+    pub(crate) fn evaluate_with_marker_extras<P, E, G>(
         self,
         env: &MarkerEnvironment,
-        marker_extras: impl Iterator<Item = &'a ExtraName>,
+        marker_extras: impl Iterator<Item = ExtraName>,
         projects: impl Iterator<Item = P>,
         extras: impl Iterator<Item = (P, E)>,
         groups: impl Iterator<Item = (P, G)>,
@@ -351,7 +351,6 @@ impl UniversalMarker {
         E: Borrow<ExtraName>,
         G: Borrow<GroupName>,
     {
-        let marker_extras = marker_extras.cloned();
         let projects = projects.map(|package| encode_project(package.borrow()));
         let extras =
             extras.map(|(package, extra)| encode_package_extra(package.borrow(), extra.borrow()));

@@ -10357,6 +10357,364 @@ fn sync_negative_extra_transitive_self_extra() -> Result<()> {
 }
 
 #[test]
+fn sync_negative_extra_top_level_extra_resolves_conflict() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    context.temp_dir.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "project"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = [
+            "number>=2",
+            "number<2 ; extra != 'old-science'",
+        ]
+
+        [project.optional-dependencies]
+        old-science = []
+
+        [tool.uv.sources]
+        number = { workspace = true }
+
+        [tool.uv.workspace]
+        members = ["number"]
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    context.temp_dir.child("src/project/__init__.py").touch()?;
+
+    let number = context.temp_dir.child("number");
+    number.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "number"
+        version = "2.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    number.child("src/number/__init__.py").touch()?;
+
+    uv_snapshot!(context.filters(), context.sync().arg("--extra").arg("old-science"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 2 packages in [TIME]
+    Prepared 2 packages in [TIME]
+    Installed 2 packages in [TIME]
+     + number==2.0.0 (from file://[TEMP_DIR]/number)
+     + project==1.0.0 (from file://[TEMP_DIR]/)
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn sync_negative_extra_incremental_valid_install() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    context.temp_dir.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "project"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = [
+            "plugin ; extra != 'gpu'",
+            "ancient>=2 ; extra != 'docs'",
+        ]
+
+        [project.optional-dependencies]
+        gpu = ["gpu-only"]
+        docs = ["docs-theme"]
+
+        [tool.uv.sources]
+        ancient = { workspace = true }
+        docs-theme = { workspace = true }
+        gpu-only = { workspace = true }
+        plugin = { workspace = true }
+
+        [tool.uv.workspace]
+        members = ["ancient", "docs_theme", "gpu_only", "plugin"]
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    context.temp_dir.child("src/project/__init__.py").touch()?;
+
+    let plugin = context.temp_dir.child("plugin");
+    plugin.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "plugin"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["project[docs]"]
+
+        [tool.uv.sources]
+        project = { workspace = true }
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    plugin.child("src/plugin/__init__.py").touch()?;
+
+    let ancient = context.temp_dir.child("ancient");
+    ancient.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "ancient"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    ancient.child("src/ancient/__init__.py").touch()?;
+
+    let docs_theme = context.temp_dir.child("docs_theme");
+    docs_theme.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "docs-theme"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    docs_theme.child("src/docs_theme/__init__.py").touch()?;
+
+    let gpu_only = context.temp_dir.child("gpu_only");
+    gpu_only.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "gpu-only"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    gpu_only.child("src/gpu_only/__init__.py").touch()?;
+
+    uv_snapshot!(context.filters(), context.sync(), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 5 packages in [TIME]
+    Prepared 4 packages in [TIME]
+    Installed 4 packages in [TIME]
+     + ancient==1.0.0 (from file://[TEMP_DIR]/ancient)
+     + docs-theme==1.0.0 (from file://[TEMP_DIR]/docs_theme)
+     + plugin==1.0.0 (from file://[TEMP_DIR]/plugin)
+     + project==1.0.0 (from file://[TEMP_DIR]/)
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn sync_negative_extra_default_runtime_toggle() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    context.temp_dir.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "project"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["cpu-runtime ; extra != 'gpu'"]
+
+        [project.optional-dependencies]
+        gpu = ["gpu-runtime"]
+
+        [tool.uv.sources]
+        cpu-runtime = { workspace = true }
+        gpu-runtime = { workspace = true }
+
+        [tool.uv.workspace]
+        members = ["cpu_runtime", "gpu_runtime"]
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    context.temp_dir.child("src/project/__init__.py").touch()?;
+
+    let cpu_runtime = context.temp_dir.child("cpu_runtime");
+    cpu_runtime.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "cpu-runtime"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    cpu_runtime.child("src/cpu_runtime/__init__.py").touch()?;
+
+    let gpu_runtime = context.temp_dir.child("gpu_runtime");
+    gpu_runtime.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "gpu-runtime"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    gpu_runtime.child("src/gpu_runtime/__init__.py").touch()?;
+
+    uv_snapshot!(context.filters(), context.sync().arg("--extra").arg("gpu"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 2 packages in [TIME]
+    Installed 2 packages in [TIME]
+     + gpu-runtime==1.0.0 (from file://[TEMP_DIR]/gpu_runtime)
+     + project==1.0.0 (from file://[TEMP_DIR]/)
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn sync_extra_marker_conjunction() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    context.temp_dir.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "project"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["something ; extra == 'this' and extra == 'that'"]
+
+        [project.optional-dependencies]
+        this = ["extra-this"]
+        that = ["extra-that"]
+
+        [tool.uv.sources]
+        extra-that = { workspace = true }
+        extra-this = { workspace = true }
+        something = { workspace = true }
+
+        [tool.uv.workspace]
+        members = ["extra_that", "extra_this", "something"]
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    context.temp_dir.child("src/project/__init__.py").touch()?;
+
+    let extra_this = context.temp_dir.child("extra_this");
+    extra_this.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "extra-this"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    extra_this.child("src/extra_this/__init__.py").touch()?;
+
+    let extra_that = context.temp_dir.child("extra_that");
+    extra_that.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "extra-that"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    extra_that.child("src/extra_that/__init__.py").touch()?;
+
+    let something = context.temp_dir.child("something");
+    something.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "something"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    something.child("src/something/__init__.py").touch()?;
+
+    // uv splits `project[this,that]` into the base package and the individual extra packages, so
+    // there is no combined extra context in which this marker can evaluate to true.
+    uv_snapshot!(context.filters(), context.sync().arg("--extra").arg("this").arg("--extra").arg("that"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 4 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + extra-that==1.0.0 (from file://[TEMP_DIR]/extra_that)
+     + extra-this==1.0.0 (from file://[TEMP_DIR]/extra_this)
+     + project==1.0.0 (from file://[TEMP_DIR]/)
+    ");
+
+    Ok(())
+}
+
+#[test]
 fn sync_extra_comma_separated() -> Result<()> {
     let context = uv_test::test_context!("3.12");
 

@@ -3715,4 +3715,17 @@ mod test {
         assert!(!marker.evaluate_only_extras(std::slice::from_ref(&b)));
         assert!(marker.evaluate_only_extras(&[a.clone(), b.clone()]));
     }
+
+    #[test]
+    fn evaluate_pep751_extras_not_in() -> Result<(), Box<dyn std::error::Error>> {
+        let a = ExtraName::from_str("a")?;
+        let b = ExtraName::from_str("b")?;
+        let env37 = env37();
+        let marker = m("'a' in extras and 'b' not in extras");
+
+        assert!(marker.evaluate_pep751(&env37, std::slice::from_ref(&a), &[]));
+        assert!(!marker.evaluate_pep751(&env37, &[a, b], &[]));
+
+        Ok(())
+    }
 }
