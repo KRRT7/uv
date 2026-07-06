@@ -2341,6 +2341,15 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                 }
                 true
             })
+            .flat_map(move |requirement| {
+                iter::once(requirement.clone()).chain(self.constraints_for_requirement_extras(
+                    requirement,
+                    extras,
+                    env,
+                    python_marker,
+                    python_requirement,
+                ))
+            })
     }
 
     /// Whether a requirement is applicable for the Python version, the markers of this fork and the
@@ -2412,6 +2421,53 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
         &'data self,
         requirement: Cow<'data, Requirement>,
         extra: Option<&'parameters ExtraName>,
+        env: &'parameters ResolverEnvironment,
+        python_marker: MarkerTree,
+        python_requirement: &'parameters PythonRequirement,
+    ) -> impl Iterator<Item = Cow<'data, Requirement>> + 'parameters
+    where
+        'data: 'parameters,
+    {
+        let extras = extra.map(slice::from_ref).unwrap_or_default();
+
+        self.constraints_for_requirement_impl(
+            requirement,
+            extras,
+            extra,
+            env,
+            python_marker,
+            python_requirement,
+        )
+    }
+
+    /// The constraints applicable to the requirement, filtered by Python version, the markers of
+    /// this fork and the requested extras.
+    fn constraints_for_requirement_extras<'data, 'parameters>(
+        &'data self,
+        requirement: Cow<'data, Requirement>,
+        extras: &'parameters [ExtraName],
+        env: &'parameters ResolverEnvironment,
+        python_marker: MarkerTree,
+        python_requirement: &'parameters PythonRequirement,
+    ) -> impl Iterator<Item = Cow<'data, Requirement>> + 'parameters
+    where
+        'data: 'parameters,
+    {
+        self.constraints_for_requirement_impl(
+            requirement,
+            extras,
+            None,
+            env,
+            python_marker,
+            python_requirement,
+        )
+    }
+
+    fn constraints_for_requirement_impl<'data, 'parameters>(
+        &'data self,
+        requirement: Cow<'data, Requirement>,
+        extras: &'parameters [ExtraName],
+        group_extra: Option<&'parameters ExtraName>,
         env: &'parameters ResolverEnvironment,
         python_marker: MarkerTree,
         python_requirement: &'parameters PythonRequirement,
@@ -2501,23 +2557,14 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                 }
 
                 // If the constraint isn't relevant for the current platform, skip it.
-                match extra {
-                    Some(source_extra) => {
-                        if !constraint
-                            .evaluate_markers(env.marker_environment(), slice::from_ref(source_extra))
-                        {
-                            return None;
-                        }
-                        if !env.included_by_group(ConflictItemRef::from((&requirement.name, source_extra)))
-                        {
-                            return None;
-                        }
-                    }
-                    None => {
-                        if !constraint.evaluate_markers(env.marker_environment(), &[]) {
-                            return None;
-                        }
-                    }
+                let marker = constraint.marker.simplify_extra_markers(extras);
+                if !marker.evaluate_optional_environment(env.marker_environment(), &[]) {
+                    return None;
+                }
+                if let Some(source_extra) = group_extra
+                    && !env.included_by_group(ConflictItemRef::from((&requirement.name, source_extra)))
+                {
+                    return None;
                 }
 
                 Some(constraint)

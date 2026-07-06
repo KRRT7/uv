@@ -10727,6 +10727,85 @@ fn sync_extra_marker_conjunction() -> Result<()> {
 }
 
 #[test]
+fn sync_extra_marker_conjunction_constraints() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    context.temp_dir.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "project"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["iniconfig ; extra == 'this' and extra == 'that'"]
+
+        [project.optional-dependencies]
+        this = ["extra-this"]
+        that = ["extra-that"]
+
+        [tool.uv]
+        constraint-dependencies = ["iniconfig<0"]
+
+        [tool.uv.sources]
+        extra-that = { workspace = true }
+        extra-this = { workspace = true }
+
+        [tool.uv.workspace]
+        members = ["extra_that", "extra_this"]
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    context.temp_dir.child("src/project/__init__.py").touch()?;
+
+    let extra_this = context.temp_dir.child("extra_this");
+    extra_this.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "extra-this"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    extra_this.child("src/extra_this/__init__.py").touch()?;
+
+    let extra_that = context.temp_dir.child("extra_that");
+    extra_that.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "extra-that"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    extra_that.child("src/extra_that/__init__.py").touch()?;
+
+    uv_snapshot!(context.filters(), context.sync().arg("--extra").arg("this").arg("--extra").arg("that"), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+
+    ----- stderr -----
+      × No solution found when resolving dependencies:
+      ╰─▶ Because only project[that,this]==1.0.0 is available and only iniconfig{extra == 'that' and extra == 'this'}>=0.1 is available, we can conclude that all versions of project[that,this] cannot be used.
+          And because your workspace requires project[that,this], we can conclude that your workspace's requirements are unsatisfiable.
+    ");
+
+    Ok(())
+}
+
+#[test]
 fn sync_extra_comma_separated() -> Result<()> {
     let context = uv_test::test_context!("3.12");
 
