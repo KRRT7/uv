@@ -99,6 +99,17 @@ fn dependency_contexts<'lock>(
     contexts.into_iter()
 }
 
+fn package_provided_extra_names<'lock>(
+    lock: &'lock Lock,
+    package: &'lock Package,
+) -> impl Iterator<Item = &'lock ExtraName> {
+    if lock.supports_provides_extra() {
+        Either::Left(package.provides_extras().iter())
+    } else {
+        Either::Right(package.optional_dependencies.keys())
+    }
+}
+
 /// Record another condition under which a locked package and optional extra are reachable.
 ///
 /// Returns `true` when the combined reachability changed.
@@ -292,7 +303,8 @@ trait InstallableExt<'lock>: Installable<'lock> {
                 // Track the activated extras.
                 if groups.prod() {
                     activated_projects.push(&dist.id.name);
-                    for extra in extras.extra_names(dist.provides_extras().iter()) {
+                    let available_extras = package_provided_extra_names(self.lock(), dist);
+                    for extra in extras.extra_names(available_extras) {
                         activated_extras.push((&dist.id.name, extra));
                     }
                 }
@@ -331,7 +343,7 @@ trait InstallableExt<'lock>: Installable<'lock> {
             if groups.prod() {
                 // Push its dependencies onto the queue.
                 let root_extras = extras
-                    .extra_names(dist.provides_extras().iter())
+                    .extra_names(package_provided_extra_names(self.lock(), dist))
                     .collect::<Vec<_>>();
                 for context in dependency_contexts(root_extras) {
                     add_reachability(

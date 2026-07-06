@@ -5509,6 +5509,19 @@ fn sync_ignore_extras_check_when_no_provides_extras() -> Result<()> {
     Checked in [TIME]
     ");
 
+    // Requesting an extra that exists only in the legacy optional-dependencies table should still
+    // traverse those optional dependencies.
+    uv_snapshot!(context.filters(), context.sync().arg("--frozen").arg("--extra").arg("types"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Prepared 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + sniffio==1.3.1
+    ");
+
     Ok(())
 }
 
