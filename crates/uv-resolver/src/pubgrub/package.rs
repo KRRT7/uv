@@ -103,12 +103,8 @@ impl PubGrubPackage {
         group: Option<GroupName>,
         marker: MarkerTree,
     ) -> Self {
-        // Remove all extra expressions from the marker, since we track extras
-        // separately. This also avoids an issue where packages added via
-        // extras end up having two distinct marker expressions, which in turn
-        // makes them two distinct packages. This results in PubGrub being
-        // unable to unify version constraints across such packages.
-        let marker = marker.without_extras();
+        // Preserve the marker on the proxy package so it can be emitted as a lockfile edge marker.
+        // Requirements are filtered for the current extra context before they reach this point.
         if let Some(extra) = extra {
             Self(Arc::new(PubGrubPackageInner::Extra {
                 name,

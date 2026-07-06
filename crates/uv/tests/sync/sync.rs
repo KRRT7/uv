@@ -10345,8 +10345,9 @@ fn sync_negative_extra_transitive_self_extra() -> Result<()> {
     ----- stdout -----
 
     ----- stderr -----
-    Resolved 2 packages in [TIME]
-    Prepared 2 packages in [TIME]
+    Using CPython 3.12.[X] interpreter at: [PYTHON-3.12]
+    Creating virtual environment at: .venv
+    Resolved 3 packages in [TIME]
     Installed 2 packages in [TIME]
      + gpu-only==1.0.0 (from file://[TEMP_DIR]/gpu_only)
      + project==1.0.0 (from file://[TEMP_DIR]/)
