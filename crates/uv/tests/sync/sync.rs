@@ -10258,6 +10258,104 @@ fn sync_all_extras() -> Result<()> {
 }
 
 #[test]
+fn sync_negative_extra_transitive_self_extra() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let pyproject_toml = context.temp_dir.child("pyproject.toml");
+    pyproject_toml.write_str(
+        r#"
+        [project]
+        name = "project"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["cpu-only ; extra != 'gpu'"]
+
+        [project.optional-dependencies]
+        gpu = ["gpu-only"]
+
+        [tool.uv.sources]
+        cpu-only = { workspace = true }
+        gpu-only = { workspace = true }
+
+        [tool.uv.workspace]
+        members = ["cpu_only", "gpu_only"]
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    context.temp_dir.child("src/project/__init__.py").touch()?;
+
+    let cpu_only = context.temp_dir.child("cpu_only");
+    cpu_only.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "cpu-only"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["project[gpu]"]
+
+        [tool.uv.sources]
+        project = { workspace = true }
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    cpu_only.child("src/cpu_only/__init__.py").touch()?;
+
+    let gpu_only = context.temp_dir.child("gpu_only");
+    gpu_only.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "gpu-only"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    gpu_only.child("src/gpu_only/__init__.py").touch()?;
+
+    uv_snapshot!(context.filters(), context.sync(), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + cpu-only==1.0.0 (from file://[TEMP_DIR]/cpu_only)
+     + gpu-only==1.0.0 (from file://[TEMP_DIR]/gpu_only)
+     + project==1.0.0 (from file://[TEMP_DIR]/)
+    ");
+
+    fs_err::remove_dir_all(&context.venv)?;
+    fs_err::remove_file(context.temp_dir.child("uv.lock"))?;
+
+    uv_snapshot!(context.filters(), context.sync().arg("--extra").arg("gpu"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 2 packages in [TIME]
+    Prepared 2 packages in [TIME]
+    Installed 2 packages in [TIME]
+     + gpu-only==1.0.0 (from file://[TEMP_DIR]/gpu_only)
+     + project==1.0.0 (from file://[TEMP_DIR]/)
+    ");
+
+    Ok(())
+}
+
+#[test]
 fn sync_extra_comma_separated() -> Result<()> {
     let context = uv_test::test_context!("3.12");
 

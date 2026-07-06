@@ -2244,11 +2244,17 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
         match extra {
             Some(source_extra) => {
                 // Only include requirements that are relevant for the current extra.
-                if requirement.evaluate_markers(env.marker_environment(), &[]) {
+                if requirement
+                    .marker
+                    .simplify_extra_markers(&[])
+                    .evaluate_optional_environment(env.marker_environment(), &[])
+                {
                     return false;
                 }
                 if !requirement
-                    .evaluate_markers(env.marker_environment(), slice::from_ref(source_extra))
+                    .marker
+                    .simplify_extra_markers(slice::from_ref(source_extra))
+                    .evaluate_optional_environment(env.marker_environment(), &[])
                 {
                     return false;
                 }
@@ -2258,7 +2264,11 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                 }
             }
             None => {
-                if !requirement.evaluate_markers(env.marker_environment(), &[]) {
+                if !requirement
+                    .marker
+                    .simplify_extra_markers(&[])
+                    .evaluate_optional_environment(env.marker_environment(), &[])
+                {
                     return false;
                 }
             }

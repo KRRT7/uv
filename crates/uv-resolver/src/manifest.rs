@@ -5,11 +5,22 @@ use either::Either;
 
 use uv_configuration::{Constraints, Excludes, Overrides};
 use uv_distribution_types::Requirement;
-use uv_normalize::PackageName;
+use uv_normalize::{ExtraName, PackageName};
 use uv_types::RequestedRequirements;
 
 use crate::preferences::Preferences;
 use crate::{DependencyMode, Exclusions, ResolverEnvironment};
+
+fn requirement_applies(
+    requirement: &Requirement,
+    env: &ResolverEnvironment,
+    extras: &[ExtraName],
+) -> bool {
+    requirement
+        .marker
+        .simplify_extra_markers(extras)
+        .evaluate_optional_environment(env.marker_environment(), &[])
+}
 
 /// A manifest of requirements, constraints, and preferences.
 #[derive(Clone, Debug)]
@@ -142,9 +153,7 @@ impl Manifest {
                     )
                 })
                 .map(|(_, _, requirement)| Cow::Borrowed(requirement))
-                .filter(move |requirement| {
-                    requirement.evaluate_markers(env.marker_environment(), &[])
-                }),
+                .filter(move |requirement| requirement_applies(requirement, env, &[])),
         )
     }
 
@@ -174,25 +183,20 @@ impl Manifest {
                                 )
                             })
                             .filter(move |requirement| {
-                                requirement
-                                    .evaluate_markers(env.marker_environment(), lookahead.extras())
+                                requirement_applies(requirement, env, lookahead.extras())
                             })
                     })
                     .chain(
                         self.overrides
                             .apply(&self.requirements)
                             .filter(|requirement| !self.excludes.contains(&requirement.name))
-                            .filter(move |requirement| {
-                                requirement.evaluate_markers(env.marker_environment(), &[])
-                            }),
+                            .filter(move |requirement| requirement_applies(requirement, env, &[])),
                     )
                     .chain(
                         self.constraints
                             .requirements()
                             .filter(|requirement| !self.excludes.contains(&requirement.name))
-                            .filter(move |requirement| {
-                                requirement.evaluate_markers(env.marker_environment(), &[])
-                            })
+                            .filter(move |requirement| requirement_applies(requirement, env, &[]))
                             .map(Cow::Borrowed),
                     ),
             ),
@@ -202,9 +206,7 @@ impl Manifest {
                     .apply(&self.requirements)
                     .chain(self.constraints.requirements().map(Cow::Borrowed))
                     .filter(|requirement| !self.excludes.contains(&requirement.name))
-                    .filter(move |requirement| {
-                        requirement.evaluate_markers(env.marker_environment(), &[])
-                    }),
+                    .filter(move |requirement| requirement_applies(requirement, env, &[])),
             ),
         }
     }
@@ -221,9 +223,7 @@ impl Manifest {
                 self.overrides
                     .global_requirements()
                     .filter(|requirement| !self.excludes.contains(&requirement.name))
-                    .filter(move |requirement| {
-                        requirement.evaluate_markers(env.marker_environment(), &[])
-                    })
+                    .filter(move |requirement| requirement_applies(requirement, env, &[]))
                     .map(Cow::Borrowed),
             ),
             // Include direct requirements, with constraints and overrides applied.
@@ -231,9 +231,7 @@ impl Manifest {
                 self.overrides
                     .global_requirements()
                     .filter(|requirement| !self.excludes.contains(&requirement.name))
-                    .filter(move |requirement| {
-                        requirement.evaluate_markers(env.marker_environment(), &[])
-                    })
+                    .filter(move |requirement| requirement_applies(requirement, env, &[]))
                     .map(Cow::Borrowed),
             ),
         }
@@ -276,25 +274,22 @@ impl Manifest {
                                 )
                             })
                             .filter(move |requirement| {
-                                requirement
-                                    .evaluate_markers(env.marker_environment(), lookahead.extras())
+                                requirement_applies(requirement, env, lookahead.extras())
                             })
                     })
                     .chain(
                         self.overrides
                             .apply(&self.requirements)
-                            .filter(move |requirement| {
-                                requirement.evaluate_markers(env.marker_environment(), &[])
-                            }),
+                            .filter(move |requirement| requirement_applies(requirement, env, &[])),
                     ),
             ),
 
             // Restrict to the direct requirements.
-            DependencyMode::Direct => {
-                Either::Right(self.overrides.apply(self.requirements.iter()).filter(
-                    move |requirement| requirement.evaluate_markers(env.marker_environment(), &[]),
-                ))
-            }
+            DependencyMode::Direct => Either::Right(
+                self.overrides
+                    .apply(self.requirements.iter())
+                    .filter(move |requirement| requirement_applies(requirement, env, &[])),
+            ),
         }
     }
 

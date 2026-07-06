@@ -1295,6 +1295,23 @@ impl MarkerTree {
         self.simplify_extras_with(|name| extras.contains(name))
     }
 
+    /// Evaluate all extra expressions against the exact provided set of extras.
+    ///
+    /// Any `extra` markers are simplified based on whether the named extra is present in `extras`.
+    #[must_use]
+    pub fn simplify_extra_markers(self, extras: &[ExtraName]) -> Self {
+        self.simplify_extra_markers_with(|name| extras.contains(name))
+    }
+
+    /// Evaluate all extra expressions against the exact provided predicate.
+    ///
+    /// Any `extra` markers are simplified based on whether the predicate returns true for the
+    /// named extra.
+    #[must_use]
+    pub fn simplify_extra_markers_with(self, is_extra: impl Fn(&ExtraName) -> bool) -> Self {
+        self.simplify_extra_markers_with_impl(&is_extra)
+    }
+
     /// Remove the extras from a marker, returning `None` if the marker tree evaluates to `true`.
     ///
     /// Any `extra` markers that are always `true` given the provided predicate will be removed.
@@ -1425,6 +1442,13 @@ impl MarkerTree {
     fn simplify_not_extras_with_impl(self, is_extra: &impl Fn(&ExtraName) -> bool) -> Self {
         Self(INTERNER.lock().restrict_by(self.0, &|var| match var {
             Variable::Extra(name) => is_extra(name.extra()).then_some(false),
+            _ => None,
+        }))
+    }
+
+    fn simplify_extra_markers_with_impl(self, is_extra: &impl Fn(&ExtraName) -> bool) -> Self {
+        Self(INTERNER.lock().restrict_by(self.0, &|var| match var {
+            Variable::Extra(name) => Some(is_extra(name.extra())),
             _ => None,
         }))
     }
