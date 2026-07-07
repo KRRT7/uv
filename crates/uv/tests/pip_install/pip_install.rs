@@ -1,8 +1,9 @@
+use std::fmt::Write;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use assert_cmd::prelude::*;
 use assert_fs::prelude::*;
 use async_zip::base::write::ZipFileWriter;
@@ -55,6 +56,47 @@ fn write_tar_gz(file: File, entries: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
+fn write_many_files_wheel(path: &Path, source_files: usize) -> Result<()> {
+    let mut writer = ZipFileWriter::new(Vec::new());
+    let mut record = String::new();
+
+    for index in 0..source_files {
+        let name = format!("large_wheel/module_{index:05}.py");
+        let entry = ZipEntryBuilder::new(name.clone().into(), Compression::Stored);
+        block_on(writer.write_entry_whole(entry, b"VALUE = 1\n"))?;
+        writeln!(record, "{name},,")?;
+    }
+
+    let metadata = indoc! {"
+        Metadata-Version: 2.1
+        Name: large-wheel
+        Version: 1.0.0
+    "};
+    let wheel = indoc! {"
+        Wheel-Version: 1.0
+        Generator: uv-test
+        Root-Is-Purelib: true
+        Tag: py3-none-any
+    "};
+    for (name, contents) in [
+        ("large_wheel-1.0.0.dist-info/METADATA", metadata),
+        ("large_wheel-1.0.0.dist-info/WHEEL", wheel),
+    ] {
+        let entry = ZipEntryBuilder::new(name.into(), Compression::Stored);
+        block_on(writer.write_entry_whole(entry, contents.as_bytes()))?;
+        writeln!(record, "{name},,")?;
+    }
+    record.push_str("large_wheel-1.0.0.dist-info/RECORD,,\n");
+    let entry = ZipEntryBuilder::new(
+        "large_wheel-1.0.0.dist-info/RECORD".into(),
+        Compression::Stored,
+    );
+    block_on(writer.write_entry_whole(entry, record.as_bytes()))?;
+
+    fs_err::write(path, block_on(writer.close())?)?;
+    Ok(())
+}
+
 #[test]
 fn missing_requirements_txt() {
     let context = uv_test::test_context!("3.12");
@@ -97,6 +139,242 @@ fn empty_requirements_txt() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Compile only distributions installed by the current operation.
+#[test]
+fn compile_bytecode_for_installed_distributions() -> Result<()> {
+    const SOURCE_FILES: usize = 16;
+
+    let context = uv_test::test_context!("3.12");
+    let wheel = context.temp_dir.join("large_wheel-1.0.0-py3-none-any.whl");
+    // This exceeds the one-worker compilation queue capacity, exercising producer backpressure.
+    write_many_files_wheel(&wheel, SOURCE_FILES)?;
+
+    uv_snapshot!(context.pip_install()
+        .arg("sniffio==1.3.1"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Prepared 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + sniffio==1.3.1
+    "
+    );
+
+    uv_snapshot!(context.pip_install()
+        .arg("anyio==3.7.1")
+        .arg("--compile-bytecode")
+        .env(EnvVars::UV_CONCURRENT_INSTALLS, "1"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 2 packages in [TIME]
+    Installed 2 packages in [TIME]
+    Bytecode compiled 45 files in [TIME]
+     + anyio==3.7.1
+     + idna==3.6
+    "
+    );
+
+    assert!(
+        context
+            .site_packages()
+            .join("anyio")
+            .join("__pycache__")
+            .join("__init__.cpython-312.pyc")
+            .exists()
+    );
+    assert!(
+        context
+            .site_packages()
+            .join("idna")
+            .join("__pycache__")
+            .join("__init__.cpython-312.pyc")
+            .exists()
+    );
+    assert!(
+        !context
+            .site_packages()
+            .join("sniffio")
+            .join("__pycache__")
+            .join("__init__.cpython-312.pyc")
+            .exists()
+    );
+
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg(&wheel)
+        .arg("--compile-bytecode")
+        .env(EnvVars::UV_CONCURRENT_INSTALLS, "1"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Prepared 1 package in [TIME]
+    Installed 1 package in [TIME]
+    Bytecode compiled 16 files in [TIME]
+     + large-wheel==1.0.0 (from file://[TEMP_DIR]/large_wheel-1.0.0-py3-none-any.whl)
+    "
+    );
+
+    let compiled = WalkDir::new(context.site_packages().join("large_wheel"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "pyc")
+        })
+        .count();
+    assert_eq!(compiled, SOURCE_FILES);
+    assert!(
+        !context
+            .site_packages()
+            .join("sniffio")
+            .join("__pycache__")
+            .exists()
+    );
+
+    uv_snapshot!(context.pip_install()
+        .arg("sniffio==1.3.1")
+        .arg("--reinstall-package")
+        .arg("sniffio")
+        .arg("--compile-bytecode"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Prepared 1 package in [TIME]
+    Uninstalled 1 package in [TIME]
+    Installed 1 package in [TIME]
+    Bytecode compiled 5 files in [TIME]
+     ~ sniffio==1.3.1
+    "
+    );
+
+    assert!(
+        context
+            .site_packages()
+            .join("sniffio")
+            .join("__pycache__")
+            .join("__init__.cpython-312.pyc")
+            .exists()
+    );
+
+    Ok(())
+}
+
+/// Compile symlinked source files installed by the current operation.
+#[test]
+#[cfg(unix)]
+fn compile_bytecode_with_symlink_link_mode() {
+    let context = uv_test::test_context!("3.12");
+
+    uv_snapshot!(context.pip_install()
+        .arg("sniffio==1.3.1")
+        .arg("--compile-bytecode")
+        .arg("--link-mode")
+        .arg("symlink"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Prepared 1 package in [TIME]
+    Installed 1 package in [TIME]
+    Bytecode compiled 5 files in [TIME]
+     + sniffio==1.3.1
+    "
+    );
+
+    assert!(
+        context
+            .site_packages()
+            .join("sniffio")
+            .join("__pycache__")
+            .join("__init__.cpython-312.pyc")
+            .exists()
+    );
+}
+
+/// Compile bytecode when installing into a relative `--target` or `--prefix` path.
+#[test]
+fn compile_bytecode_for_relative_install_root() {
+    let context = uv_test::test_context!("3.12")
+        .with_filtered_python_names()
+        .with_filtered_virtualenv_bin()
+        .with_filtered_exe_suffix();
+
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg("sniffio==1.3.1")
+        .arg("--target")
+        .arg("target")
+        .arg("--compile-bytecode"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Using CPython 3.12.[X] interpreter at: .venv/[BIN]/[PYTHON]
+    Resolved 1 package in [TIME]
+    Prepared 1 package in [TIME]
+    Installed 1 package in [TIME]
+    Bytecode compiled 5 files in [TIME]
+     + sniffio==1.3.1
+    "
+    );
+
+    assert!(
+        context
+            .temp_dir
+            .join("target")
+            .join("sniffio")
+            .join("__pycache__")
+            .join("__init__.cpython-312.pyc")
+            .exists()
+    );
+
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg("sniffio==1.3.1")
+        .arg("--prefix")
+        .arg("prefix")
+        .arg("--compile-bytecode"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Using CPython 3.12.[X] interpreter at: .venv/[BIN]/[PYTHON]
+    Resolved 1 package in [TIME]
+    Installed 1 package in [TIME]
+    Bytecode compiled 5 files in [TIME]
+     + sniffio==1.3.1
+    "
+    );
+
+    let compiled = WalkDir::new(context.temp_dir.join("prefix"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "pyc")
+        })
+        .count();
+    assert_eq!(compiled, 5);
 }
 
 #[test]
@@ -165,10 +443,10 @@ fn invalid_pyproject_toml_syntax() -> Result<()> {
     error: Failed to parse: `pyproject.toml`
       Caused by: Invalid `pyproject.toml`
       Caused by: TOML parse error at line 1, column 5
-      |
-    1 | 123 - 456
-      |     ^
-    key with no value, expected `=`
+          |
+        1 | 123 - 456
+          |     ^
+        key with no value, expected `=`
     "
     );
 
@@ -191,10 +469,10 @@ fn invalid_pyproject_toml_project_schema() -> Result<()> {
     ----- stderr -----
     error: Failed to parse: `pyproject.toml`
       Caused by: TOML parse error at line 1, column 1
-      |
-    1 | [project]
-      | ^^^^^^^^^
-    `pyproject.toml` is using the `[project]` table, but the required `project.name` field is not set
+          |
+        1 | [project]
+          | ^^^^^^^^^
+        `pyproject.toml` is using the `[project]` table, but the required `project.name` field is not set
     "
     );
 
@@ -2615,8 +2893,8 @@ fn install_git_unescaped_ref() {
     ----- stderr -----
     error: Failed to parse: `example @ git+https://example.com/repository@pkg@1.2.3`
       Caused by: Ambiguous Git URL `https://example.com/repository@pkg@1.2.3`: the path contains multiple `@` characters. If the Git revision contains `@`, percent-encode it as `%40`
-    example @ git+https://example.com/repository@pkg@1.2.3
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        example @ git+https://example.com/repository@pkg@1.2.3
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     ");
 }
 
@@ -4168,6 +4446,60 @@ fn install_upgrade() {
      + httpcore==1.0.4
     "
     );
+}
+
+/// `--upgrade` takes precedence over `upgrade-package` in configuration.
+#[test]
+fn install_upgrade_overrides_configured_upgrade_package() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    // Install old versions of two packages.
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg("anyio==3.6.2")
+        .arg("httpcore==0.16.3"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 6 packages in [TIME]
+    Prepared 6 packages in [TIME]
+    Installed 6 packages in [TIME]
+     + anyio==3.6.2
+     + certifi==2024.2.2
+     + h11==0.14.0
+     + httpcore==0.16.3
+     + idna==3.6
+     + sniffio==1.3.1
+    ");
+
+    let uv_toml = context.temp_dir.child("uv.toml");
+    uv_toml.write_str(indoc! {r#"
+        [pip]
+        upgrade-package = ["anyio"]
+    "#})?;
+
+    // Upgrade both packages, including `httpcore`, which is not selected in the configuration.
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg("anyio")
+        .arg("httpcore")
+        .arg("--upgrade"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 6 packages in [TIME]
+    Prepared 2 packages in [TIME]
+    Uninstalled 2 packages in [TIME]
+    Installed 2 packages in [TIME]
+     - anyio==3.6.2
+     + anyio==4.3.0
+     - httpcore==0.16.3
+     + httpcore==1.0.4
+    ");
+
+    Ok(())
 }
 
 /// Install a package from a `requirements.txt` file, with a `constraints.txt` file.
@@ -9683,8 +10015,8 @@ fn install_incompatible_python_version_interpreter_broken_in_path() -> Result<()
     error: Failed to inspect Python interpreter from first executable in the search path at `[BIN]/python3`
       Caused by: Querying Python at `[BIN]/python3` failed with exit status exit status: 1
 
-    [stderr]
-    error: intentionally broken python executable
+        [stderr]
+        error: intentionally broken python executable
     "
     );
 
@@ -10088,8 +10420,8 @@ fn invalid_extension() {
     ----- stderr -----
     error: Failed to parse: `ruff @ https://files.pythonhosted.org/packages/f7/69/96766da2cdb5605e6a31ef2734aff0be17901cefb385b885c2ab88896d76/ruff-0.5.6.tar.baz`
       Caused by: Expected direct URL (`https://files.pythonhosted.org/packages/f7/69/96766da2cdb5605e6a31ef2734aff0be17901cefb385b885c2ab88896d76/ruff-0.5.6.tar.baz`) to end in a supported file extension: `.whl`, `.tar.gz`, `.zip`, `.tar.bz2`, `.tar.lz`, `.tar.lzma`, `.tar.xz`, `.tar.zst`, `.tar`, `.tbz`, `.tgz`, `.tlz`, or `.txz`
-    ruff @ https://files.pythonhosted.org/packages/f7/69/96766da2cdb5605e6a31ef2734aff0be17901cefb385b885c2ab88896d76/ruff-0.5.6.tar.baz
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        ruff @ https://files.pythonhosted.org/packages/f7/69/96766da2cdb5605e6a31ef2734aff0be17901cefb385b885c2ab88896d76/ruff-0.5.6.tar.baz
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     ");
 }
 
@@ -10108,8 +10440,8 @@ fn no_extension() {
     ----- stderr -----
     error: Failed to parse: `ruff @ https://files.pythonhosted.org/packages/f7/69/96766da2cdb5605e6a31ef2734aff0be17901cefb385b885c2ab88896d76/ruff-0.5.6`
       Caused by: Expected direct URL (`https://files.pythonhosted.org/packages/f7/69/96766da2cdb5605e6a31ef2734aff0be17901cefb385b885c2ab88896d76/ruff-0.5.6`) to end in a supported file extension: `.whl`, `.tar.gz`, `.zip`, `.tar.bz2`, `.tar.lz`, `.tar.lzma`, `.tar.xz`, `.tar.zst`, `.tar`, `.tbz`, `.tgz`, `.tlz`, or `.txz`
-    ruff @ https://files.pythonhosted.org/packages/f7/69/96766da2cdb5605e6a31ef2734aff0be17901cefb385b885c2ab88896d76/ruff-0.5.6
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        ruff @ https://files.pythonhosted.org/packages/f7/69/96766da2cdb5605e6a31ef2734aff0be17901cefb385b885c2ab88896d76/ruff-0.5.6
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     ");
 }
 
@@ -10564,8 +10896,8 @@ fn missing_git_prefix() -> Result<()> {
     ----- stderr -----
     error: Failed to parse: `workspace-in-root-test @ https://github.com/astral-sh/workspace-in-root-test`
       Caused by: Direct URL (`https://github.com/astral-sh/workspace-in-root-test`) references a Git repository, but is missing the `git+` prefix (e.g., `git+https://github.com/astral-sh/workspace-in-root-test`)
-    workspace-in-root-test @ https://github.com/astral-sh/workspace-in-root-test
-                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        workspace-in-root-test @ https://github.com/astral-sh/workspace-in-root-test
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     "
     );
 
@@ -12181,8 +12513,8 @@ fn unsupported_git_scheme() {
     ----- stderr -----
     error: Failed to parse: `git+fantasy://foo`
       Caused by: Unsupported Git URL scheme `fantasy:` in `fantasy://foo` (expected one of `https:`, `ssh:`, or `file:`)
-    git+fantasy://foo
-    ^^^^^^^^^^^^^^^^^
+        git+fantasy://foo
+        ^^^^^^^^^^^^^^^^^
     "
     );
 }
@@ -13558,10 +13890,10 @@ fn pep_751_lock_version() -> Result<()> {
     ----- stderr -----
     error: Not a valid `pylock.toml` file: pylock.toml
       Caused by: TOML parse error at line 2, column 24
-      |
-    2 |         lock-version = "2.0"
-      |                        ^^^^^
-    unsupported lock version (`2.0`, but only major version 1 is supported)
+          |
+        2 |         lock-version = "2.0"
+          |                        ^^^^^
+        unsupported lock version (`2.0`, but only major version 1 is supported)
     "#
     );
 
@@ -14578,7 +14910,7 @@ fn reject_invalid_central_directory_offset() {
       × Failed to download `attrs @ https://pub-c6f28d316acd406eae43501e51ad30fa.r2.dev/zip1/attrs-25.3.0-py3-none-any.whl`
       ├─▶ Failed to extract archive: attrs-25.3.0-py3-none-any.whl
       ├─▶ Invalid zip file structure
-      ╰─▶ the end of central directory offset (0xf0d9) did not match the actual offset (0xf9ac)
+      ╰─▶ the central directory size (0x8d3) did not match the observed byte span (0x911)
     "
     );
 }
@@ -16585,6 +16917,69 @@ fn handle_record_mismatches() -> Result<()> {
     foo/__init__.py,,49
     foo/py.typed,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
     ");
+
+    Ok(())
+}
+
+/// Compile installed packages without compiling the Python standard library.
+#[test]
+fn compile_bytecode_excludes_stdlib() -> Result<()> {
+    fn count_python_sources(root: &Path) -> Result<usize> {
+        let mut count = 0;
+        for entry in WalkDir::new(root) {
+            let entry = entry?;
+            if entry.file_type().is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "py")
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    let context = uv_test::test_context!("3.12").with_filtered_compiled_file_count();
+
+    let output = uv_snapshot!(context.filters(), context.pip_install()
+        .arg("sniffio==1.3.1")
+        .arg("--compile-bytecode"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Prepared 1 package in [TIME]
+    Installed 1 package in [TIME]
+    Bytecode compiled [COUNT] files in [TIME]
+     + sniffio==1.3.1
+    ");
+
+    let stderr = String::from_utf8(output.stderr)?;
+    let compiled = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("Bytecode compiled "))
+        .and_then(|line| line.split_whitespace().next())
+        .context("Expected a bytecode compilation summary")?
+        .parse::<usize>()?;
+
+    let stdlib = context
+        .python_command()
+        .arg("-c")
+        .arg("import sysconfig; print(sysconfig.get_path('stdlib'))")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdlib = PathBuf::from(String::from_utf8(stdlib)?.trim());
+
+    let site_packages_sources = count_python_sources(&context.site_packages())?;
+    let stdlib_sources = count_python_sources(&stdlib)?;
+    assert!(stdlib_sources > site_packages_sources);
+    assert!(compiled <= site_packages_sources);
 
     Ok(())
 }

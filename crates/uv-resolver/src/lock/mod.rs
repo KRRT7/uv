@@ -806,7 +806,7 @@ impl Lock {
 
     /// Intersect a requirement marker with the forks that contain a package, then simplify it
     /// under the lockfile's Python requirement.
-    pub(crate) fn root_requirement_marker(
+    fn root_requirement_marker(
         &self,
         requirement: &Requirement,
         package: &Package,
@@ -3944,7 +3944,7 @@ impl Package {
         match &self.id.source {
             Source::Git(url, git) => Ok(Some(ResolvedRepositoryReference {
                 reference: RepositoryReference {
-                    url: RepositoryUrl::new(&url.to_url().map_err(LockErrorKind::InvalidUrl)?),
+                    url: RepositoryUrl::new(url.to_url().map_err(LockErrorKind::InvalidUrl)?),
                     reference: GitReference::from(git.kind.clone()),
                 },
                 sha: git.precise,
@@ -6312,9 +6312,9 @@ impl WheelTagHint {
             .iter()
             .map(|filename| {
                 tags.compatibility(
-                    filename.python_tags(),
-                    filename.abi_tags(),
-                    filename.platform_tags(),
+                    filename.python_tags().iter(),
+                    filename.abi_tags().iter(),
+                    filename.platform_tags().iter(),
                 )
             })
             .max()?;

@@ -57,7 +57,7 @@ impl AuthBackend {
 /// Authentication scheme to use.
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AuthScheme {
+enum AuthScheme {
     /// HTTP Basic Authentication
     ///
     /// Uses a username and password.
@@ -350,10 +350,10 @@ impl TextCredentialStore {
         // TODO(zanieb): Consider adding `DisplaySafeUrlRef` so we can avoid this clone
         // TODO(zanieb): We could also return early here if we can't normalize to a `Service`
         if let Ok(url_service) = Service::try_from(url.clone()) {
-            if let Some(credential) = self.credentials.get(&(
-                url_service.clone(),
-                Username::from(username.map(str::to_string)),
-            )) {
+            if let Some(credential) = self
+                .credentials
+                .get(&(url_service, Username::from(username.map(str::to_string))))
+            {
                 return Ok(Some(credential));
             }
         }

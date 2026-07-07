@@ -252,7 +252,30 @@ fn locked() -> Result<()> {
 
     ----- stderr -----
     Resolved 2 packages in [TIME]
-    The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`.
+    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.
+
+    hint: To update the lockfile, run `uv lock`.
+    ");
+
+    // Quiet mode suppresses the resolution summary, but preserves the user-facing failure.
+    uv_snapshot!(context.filters(), context.sync().arg("--locked").arg("--quiet"), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+
+    ----- stderr -----
+    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.
+
+    hint: To update the lockfile, run `uv lock`.
+    ");
+
+    // Silent mode suppresses the final error too.
+    uv_snapshot!(context.filters(), context.sync().arg("--locked").arg("--quiet").arg("--quiet"), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+
+    ----- stderr -----
     ");
 
     let updated = context.read("uv.lock");
@@ -712,7 +735,9 @@ fn sync_json() -> Result<()> {
 
     ----- stderr -----
     Resolved 2 packages in [TIME]
-    The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`.
+    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.
+
+    hint: To update the lockfile, run `uv lock`.
     ");
 
     // Test that JSON output is shown even with --quiet flag
@@ -4760,10 +4785,10 @@ fn sync_default_groups_gibberish() -> Result<()> {
     ----- stderr -----
     error: Failed to parse: `pyproject.toml`
       Caused by: TOML parse error at line 14, column 26
-       |
-    14 |         default-groups = "gibberish"
-       |                          ^^^^^^^^^^^
-    default-groups must be "all" or a ["list", "of", "groups"]
+           |
+        14 |         default-groups = "gibberish"
+           |                          ^^^^^^^^^^^
+        default-groups must be "all" or a ["list", "of", "groups"]
     "#);
 
     Ok(())
@@ -12868,7 +12893,9 @@ fn sync_dry_run_and_locked() -> Result<()> {
     Would download 1 package
     Would install 1 package
      + iniconfig==2.0.0
-    The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`.
+    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.
+
+    hint: To update the lockfile, run `uv lock`.
     ");
 
     let updated = context.read("uv.lock");
@@ -13183,7 +13210,9 @@ fn sync_locked_script() -> Result<()> {
     ----- stderr -----
     Using script environment at: [CACHE_DIR]/environments-v2/script-[HASH]
     Resolved 4 packages in [TIME]
-    The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`.
+    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.
+
+    hint: To update the lockfile, run `uv lock`.
     ");
 
     uv_snapshot!(context.filters(), context.sync().arg("--script").arg("script.py"), @"
@@ -13286,7 +13315,9 @@ fn sync_locked_script() -> Result<()> {
     Updating script environment at: [CACHE_DIR]/environments-v2/script-[HASH]
     warning: Resolving despite existing lockfile due to fork markers being disjoint with `requires-python`: `python_full_version >= '3.11'` vs `python_full_version >= '3.8' and python_full_version < '3.11'`
     Resolved 6 packages in [TIME]
-    The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`.
+    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.
+
+    hint: To update the lockfile, run `uv lock`.
     ");
 
     uv_snapshot!(context.filters(), context.sync().arg("--script").arg("script.py"), @"
@@ -14165,7 +14196,9 @@ fn sync_build_constraints() -> Result<()> {
 
     ----- stderr -----
     Resolved 2 packages in [TIME]
-    The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`.
+    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.
+
+    hint: To update the lockfile, run `uv lock`.
     ");
 
     // Changing the build constraints should lead to a re-resolve.
@@ -17560,10 +17593,10 @@ fn sync_fails_ambiguous_url() -> Result<()> {
 
     error: Failed to parse: `pyproject.toml`
       Caused by: TOML parse error at line 10, column 15
-       |
-    10 |         url = "https://user/name:password@domain/a/b/c"
-       |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    ambiguous user/pass authority in URL (not percent-encoded?): https:***@domain/a/b/c
+           |
+        10 |         url = "https://user/name:password@domain/a/b/c"
+           |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        ambiguous user/pass authority in URL (not percent-encoded?): https:***@domain/a/b/c
     "#);
 
     Ok(())

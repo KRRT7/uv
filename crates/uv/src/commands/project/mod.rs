@@ -80,7 +80,7 @@ pub(crate) mod lock_target;
 pub(crate) mod remove;
 pub(crate) mod run;
 pub(crate) mod sync;
-pub(crate) mod toolchain;
+mod toolchain;
 pub(crate) mod tree;
 pub(crate) mod upgrade;
 pub(crate) mod version;
@@ -141,9 +141,7 @@ impl From<FrozenSource> for MissingLockfileSource {
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum ProjectError {
-    #[error(
-        "The lockfile at `uv.lock` needs to be updated, but `{2}` was provided. To update the lockfile, run `uv lock`."
-    )]
+    #[error("The lockfile at `uv.lock` needs to be updated, but `{2}` was provided.")]
     LockMismatch(Option<Box<Lock>>, Box<Lock>, LockCheckSource),
 
     #[error(
@@ -152,7 +150,7 @@ pub(crate) enum ProjectError {
     MissingLockfile(MissingLockfileSource, PathBuf),
 
     #[error(
-        "The lockfile at `uv.lock` needs to be updated, but `--frozen` was provided: Missing workspace member `{0}`. To update the lockfile, run `uv lock`."
+        "The lockfile at `uv.lock` needs to be updated, but `--frozen` was provided: Missing workspace member `{0}`."
     )]
     LockWorkspaceMismatch(PackageName),
 
@@ -402,12 +400,16 @@ impl std::fmt::Display for MalwareFindings {
 impl uv_errors::Hint for ProjectError {
     fn hints(&self) -> uv_errors::Hints<'_> {
         match self {
+            Self::LockMismatch(..) | Self::LockWorkspaceMismatch(..) => {
+                uv_errors::Hints::from("To update the lockfile, run `uv lock`.")
+            }
             Self::OverlappingMarkers(_, rhs, replacement) => {
                 uv_errors::Hints::from(format!("replace `{rhs}` with `{replacement}`"))
             }
             Self::Lock(err) => err.hints(),
             Self::Python(err) => err.hints(),
             Self::Operation(err) => err.hints(),
+            Self::Client(err) => uv_errors::Hint::hints(err),
             _ => uv_errors::Hints::none(),
         }
     }
@@ -2687,7 +2689,7 @@ pub(crate) async fn sync_environment(
         reinstall,
         build_options,
         link_mode,
-        compile_bytecode,
+        compile_bytecode.then_some(pip::operations::BytecodeCompilation::All),
         &hasher,
         tags,
         &client,
@@ -2721,7 +2723,7 @@ pub(crate) struct EnvironmentUpdate {
 
 impl EnvironmentUpdate {
     /// Convert the [`EnvironmentUpdate`] into a [`PythonEnvironment`].
-    pub(crate) fn into_environment(self) -> PythonEnvironment {
+    fn into_environment(self) -> PythonEnvironment {
         self.environment
     }
 }
@@ -2988,7 +2990,7 @@ pub(crate) async fn update_environment(
         reinstall,
         build_options,
         *link_mode,
-        *compile_bytecode,
+        (*compile_bytecode).then_some(pip::operations::BytecodeCompilation::All),
         &hasher,
         &tags,
         &client,
