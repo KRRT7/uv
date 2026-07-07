@@ -2022,18 +2022,17 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                     }
                 };
 
-                let python_marker = python_requirement.to_marker_tree();
-                let requirements = self.requirements_for_extras(
-                    metadata.requires_dist.iter(),
-                    extras,
-                    Some((name, version)),
-                    Some((name, version)),
+                let requested_extras = extras.iter().cloned().collect::<Vec<_>>();
+                let requirements = self.flatten_requirements_for_extras(
+                    &metadata.requires_dist,
+                    &requested_extras,
+                    Some(name),
+                    Some(version),
                     env,
-                    python_marker,
                     python_requirement,
                 );
 
-                let package_dependencies = requirements.flat_map(|requirement| {
+                let package_dependencies = requirements.into_iter().flat_map(|requirement| {
                     PubGrubDependency::from_requirement(
                         &self.conflicts,
                         requirement,
@@ -2258,6 +2257,67 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
             requirements.extend(self_constraints.into_iter().map(Cow::Owned));
 
             Either::Right(requirements.into_iter())
+        }
+    }
+
+    /// The regular dependencies filtered by Python version, the markers of this fork, and the full
+    /// set of package-local extras requested for the current package.
+    fn flatten_requirements_for_extras<'a>(
+        &'a self,
+        dependencies: &'a [Requirement],
+        extras: &'a [ExtraName],
+        name: Option<&'a PackageName>,
+        version: Option<&'a Version>,
+        env: &'a ResolverEnvironment,
+        python_requirement: &'a PythonRequirement,
+    ) -> Vec<Cow<'a, Requirement>> {
+        let python_marker = python_requirement.to_marker_tree();
+        let mut active_extras = extras.iter().cloned().collect::<BTreeSet<_>>();
+
+        loop {
+            let extras = active_extras.iter().cloned().collect::<Vec<_>>();
+            let requirements = self
+                .requirements_for_extras(
+                    dependencies.iter(),
+                    &extras,
+                    name.zip(version),
+                    name.zip(version),
+                    env,
+                    python_marker,
+                    python_requirement,
+                )
+                .collect::<Vec<_>>();
+
+            let previous_len = active_extras.len();
+            for requirement in &requirements {
+                if name == Some(&requirement.name) {
+                    active_extras.extend(requirement.extras.iter().cloned());
+                }
+            }
+            if active_extras.len() != previous_len {
+                continue;
+            }
+
+            let mut output = Vec::with_capacity(requirements.len());
+            let mut self_constraints = vec![];
+            for requirement in requirements {
+                if name == Some(&requirement.name) && !requirement.extras.is_empty() {
+                    if !requirement.source.is_empty() {
+                        self_constraints.push(Requirement {
+                            name: requirement.name.clone(),
+                            extras: Box::new([]),
+                            groups: requirement.groups.clone(),
+                            source: requirement.source.clone(),
+                            origin: requirement.origin.clone(),
+                            marker: requirement.marker,
+                        });
+                    }
+                } else {
+                    output.push(requirement);
+                }
+            }
+            output.extend(self_constraints.into_iter().map(Cow::Owned));
+            return output;
         }
     }
 
@@ -3526,19 +3586,26 @@ impl ForkState {
                 let self_package = &self.pubgrub.package_store[self_package];
                 let dependency_package = &self.pubgrub.package_store[dependency_package];
 
-                let (self_name, self_extra, self_group) = match &**self_package {
+                let (self_name, self_extra, self_group, self_extras) = match &**self_package {
                     PubGrubPackageInner::Package {
                         name: self_name,
                         extra: self_extra,
                         group: self_group,
                         marker: _,
-                    } => (Some(self_name), self_extra.as_ref(), self_group.as_ref()),
+                    } => (
+                        Some(self_name),
+                        self_extra.as_ref(),
+                        self_group.as_ref(),
+                        None,
+                    ),
 
                     PubGrubPackageInner::Extras {
-                        name: self_name, ..
-                    } => (Some(self_name), None, None),
+                        name: self_name,
+                        extras,
+                        ..
+                    } => (Some(self_name), None, None, Some(extras)),
 
-                    PubGrubPackageInner::Root(_) => (None, None, None),
+                    PubGrubPackageInner::Root(_) => (None, None, None, None),
 
                     _ => continue,
                 };
@@ -3547,6 +3614,7 @@ impl ForkState {
                     .map(|self_name| self.source(self_name, self_version))
                     .unwrap_or((None, None));
 
+                let edge_start = edges.len();
                 match **dependency_package {
                     PubGrubPackageInner::Package {
                         name: ref dependency_name,
@@ -3673,6 +3741,56 @@ impl ForkState {
                         edges.push(edge);
                     }
 
+                    PubGrubPackageInner::Extras {
+                        name: ref dependency_name,
+                        extras: ref dependency_extras,
+                        marker: ref dependency_marker,
+                    } => {
+                        if self_group.is_none() {
+                            debug_assert!(
+                                self_name != Some(dependency_name),
+                                "Extras should be flattened"
+                            );
+                        }
+                        let (to_url, to_index) = self.source(dependency_name, dependency_version);
+
+                        for dependency_extra in dependency_extras.iter() {
+                            let edge = ResolutionDependencyEdge {
+                                from: self_name.cloned(),
+                                from_version: self_version.clone(),
+                                from_url: self_url.cloned(),
+                                from_index: self_index.cloned(),
+                                from_extra: self_extra.cloned(),
+                                from_group: self_group.cloned(),
+                                to: dependency_name.clone(),
+                                to_version: dependency_version.clone(),
+                                to_url: to_url.cloned(),
+                                to_index: to_index.cloned(),
+                                to_extra: Some(dependency_extra.clone()),
+                                to_group: None,
+                                marker: *dependency_marker,
+                            };
+                            edges.push(edge);
+                        }
+
+                        let edge = ResolutionDependencyEdge {
+                            from: self_name.cloned(),
+                            from_version: self_version.clone(),
+                            from_url: self_url.cloned(),
+                            from_index: self_index.cloned(),
+                            from_extra: self_extra.cloned(),
+                            from_group: self_group.cloned(),
+                            to: dependency_name.clone(),
+                            to_version: dependency_version.clone(),
+                            to_url: to_url.cloned(),
+                            to_index: to_index.cloned(),
+                            to_extra: None,
+                            to_group: None,
+                            marker: *dependency_marker,
+                        };
+                        edges.push(edge);
+                    }
+
                     PubGrubPackageInner::Group {
                         name: ref dependency_name,
                         group: ref dependency_group,
@@ -3707,33 +3825,66 @@ impl ForkState {
 
                     _ => {}
                 }
+                if let Some(self_extra) = self_extra {
+                    for edge in &mut edges[edge_start..] {
+                        edge.marker = edge.marker.simplify_extras(slice::from_ref(self_extra));
+                    }
+                }
+                if let Some(self_extras) = self_extras {
+                    let new_edges = edges.drain(edge_start..).collect::<Vec<_>>();
+                    for edge in new_edges {
+                        for extra in self_extras.iter() {
+                            let mut edge = edge.clone();
+                            edge.from_extra = Some(extra.clone());
+                            edge.marker = edge.marker.simplify_extras(slice::from_ref(extra));
+                            edges.push(edge);
+                        }
+                    }
+                }
             }
         }
 
         let nodes = solution
             .into_iter()
-            .filter_map(|(package, version)| {
-                if let PubGrubPackageInner::Package {
-                    name,
-                    extra,
-                    group,
-                    marker: MarkerTree::TRUE,
-                } = &*self.pubgrub.package_store[package]
-                {
-                    let (url, index) = self.source(name, &version);
-                    Some((
-                        ResolutionPackage {
-                            name: name.clone(),
-                            extra: extra.clone(),
-                            dev: group.clone(),
-                            url: url.cloned(),
-                            index: index.cloned(),
-                        },
-                        version,
-                    ))
-                } else {
-                    None
+            .flat_map(|(package, version)| {
+                let mut nodes = vec![];
+                match &*self.pubgrub.package_store[package] {
+                    PubGrubPackageInner::Package {
+                        name,
+                        extra,
+                        group,
+                        marker: MarkerTree::TRUE,
+                    } => {
+                        let (url, index) = self.source(name, &version);
+                        nodes.push((
+                            ResolutionPackage {
+                                name: name.clone(),
+                                extra: extra.clone(),
+                                dev: group.clone(),
+                                url: url.cloned(),
+                                index: index.cloned(),
+                            },
+                            version,
+                        ));
+                    }
+                    PubGrubPackageInner::Extras { name, extras, .. } => {
+                        let (url, index) = self.source(name, &version);
+                        nodes.extend(extras.iter().cloned().map(|extra| {
+                            (
+                                ResolutionPackage {
+                                    name: name.clone(),
+                                    extra: Some(extra),
+                                    dev: None,
+                                    url: url.cloned(),
+                                    index: index.cloned(),
+                                },
+                                version.clone(),
+                            )
+                        }));
+                    }
+                    _ => {}
                 }
+                nodes
             })
             .collect();
 
@@ -4276,7 +4427,7 @@ impl Fork {
 
     /// Add a dependency to this fork.
     fn add_dependency(&mut self, dep: PubGrubDependency) {
-        if let Some(conflicting_item) = dep.conflicting_item() {
+        for conflicting_item in dep.conflicting_items() {
             self.conflicts.insert(conflicting_item.to_owned());
         }
         self.dependencies.push(dep);
@@ -4293,7 +4444,7 @@ impl Fork {
             if self.env.included_by_marker(marker) {
                 return true;
             }
-            if let Some(conflicting_item) = dep.conflicting_item() {
+            for conflicting_item in dep.conflicting_items() {
                 self.conflicts.remove(&conflicting_item);
             }
             false
@@ -4318,25 +4469,31 @@ impl Fork {
     ) -> Option<Self> {
         self.env = self.env.filter_by_group(rules)?;
         self.dependencies.retain(|dep| {
-            let Some(conflicting_item) = dep.conflicting_item() else {
+            let conflicting_items = dep.conflicting_items().collect::<Vec<_>>();
+            if conflicting_items.is_empty() {
                 return true;
             };
-            if self.env.included_by_group(conflicting_item) {
-                return true;
-            }
-            match conflicting_item.kind() {
-                // We should not filter entire projects unless they're a top-level dependency
-                // Otherwise, we'll fail to solve for children of the project, like extras
-                ConflictKindRef::Project => {
-                    if dep.parent.is_some() {
-                        return true;
-                    }
+            for conflicting_item in &conflicting_items {
+                if self.env.included_by_group(*conflicting_item) {
+                    continue;
                 }
-                ConflictKindRef::Group(_) => {}
-                ConflictKindRef::Extra(_) => {}
+                match conflicting_item.kind() {
+                    // We should not filter entire projects unless they're a top-level dependency
+                    // Otherwise, we'll fail to solve for children of the project, like extras
+                    ConflictKindRef::Project => {
+                        if dep.parent.is_some() {
+                            continue;
+                        }
+                    }
+                    ConflictKindRef::Group(_) => {}
+                    ConflictKindRef::Extra(_) => {}
+                }
+                for conflicting_item in conflicting_items {
+                    self.conflicts.remove(&conflicting_item);
+                }
+                return false;
             }
-            self.conflicts.remove(&conflicting_item);
-            false
+            true
         });
         Some(self)
     }

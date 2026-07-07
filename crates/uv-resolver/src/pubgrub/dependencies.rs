@@ -118,7 +118,9 @@ impl PubGrubDependency {
         let parent_name = parent_package.and_then(|package| package.name_no_root());
         let is_normal_parent = parent_package
             .is_some_and(|parent| parent.extra().is_none() && parent.group().is_none());
-        let combined_extras = if requirement.extras.len() > 1 {
+        // Resolve every extra request through an extras-set proxy, including singleton extras, so
+        // dependencies can be evaluated against the full package-local extra set.
+        let combined_extras = if !requirement.extras.is_empty() {
             let pubgrub_requirement = PubGrubRequirement::from_requirement_extras(&requirement);
             let PubGrubRequirement {
                 package,
@@ -139,34 +141,23 @@ impl PubGrubDependency {
             None
         };
         let iter = if !requirement.extras.is_empty() {
-            // This is crazy subtle, but if any of the extras in the
-            // requirement are part of a declared conflict, then we
-            // specifically need (at time of writing) to include the
-            // base package as a dependency. This results in both
-            // the base package and the extra package being sibling
-            // dependencies at the point in which forks are created
-            // base on conflicting extras. If the base package isn't
-            // present at that point, then it's impossible for the
-            // fork that excludes all conflicting extras to reach
-            // the non-extra dependency, which may be necessary for
-            // correctness.
-            //
-            // But why do we not include the base package in the first
-            // place? Well, that's part of an optimization[1].
-            //
-            // [1]: https://github.com/astral-sh/uv/pull/9540
-            let base = if requirement
+            let has_conflicting_extra = requirement
                 .extras
                 .iter()
-                .any(|extra| conflicts.contains(&requirement.name, extra))
-            {
+                .any(|extra| conflicts.contains(&requirement.name, extra));
+            let base = if has_conflicting_extra {
                 Either::Left(iter::once((None, None)))
             } else {
                 Either::Right(iter::empty())
             };
-            Either::Left(Either::Left(base.chain(
-                Box::into_iter(requirement.extras.clone()).map(|extra| (Some(extra), None)),
-            )))
+            let extras = if has_conflicting_extra {
+                Either::Left(
+                    Box::into_iter(requirement.extras.clone()).map(|extra| (Some(extra), None)),
+                )
+            } else {
+                Either::Right(iter::empty())
+            };
+            Either::Left(Either::Left(base.chain(extras)))
         } else if !requirement.groups.is_empty() {
             let base = if requirement
                 .groups
@@ -265,12 +256,19 @@ impl PubGrubDependency {
             }))
     }
 
-    /// Extracts a possible conflicting item from this dependency.
+    /// Extracts possible conflicting items from this dependency.
     ///
     /// If this package can't possibly be classified as conflicting, then this
-    /// returns `None`.
-    pub(crate) fn conflicting_item(&self) -> Option<ConflictItemRef<'_>> {
-        self.package.conflicting_item()
+    /// returns an empty iterator.
+    pub(crate) fn conflicting_items(&self) -> impl Iterator<Item = ConflictItemRef<'_>> {
+        match &*self.package {
+            PubGrubPackageInner::Extras { name, extras, .. } => Either::Left(
+                extras
+                    .iter()
+                    .map(move |extra| ConflictItemRef::from((name, extra))),
+            ),
+            _ => Either::Right(self.package.conflicting_item().into_iter()),
+        }
     }
 }
 

@@ -55,6 +55,7 @@ impl DependencyContext {
 }
 
 fn evaluate_dependency_marker<'lock>(
+    package: &'lock Package,
     dependency: &'lock Dependency,
     context: &DependencyContext,
     marker_env: &ResolverMarkerEnvironment,
@@ -62,9 +63,10 @@ fn evaluate_dependency_marker<'lock>(
     activated_extras: &[(&'lock PackageName, &'lock ExtraName)],
     activated_groups: &[(&'lock PackageName, &'lock GroupName)],
 ) -> bool {
+    let marker_extras = marker_extras_for_package(package, context, activated_extras);
     dependency.complexified_marker.evaluate_with_marker_extras(
         marker_env,
-        context.marker_extras(),
+        marker_extras.iter().copied(),
         activated_projects.iter().copied(),
         activated_extras.iter().copied(),
         activated_groups.iter().copied(),
@@ -85,6 +87,27 @@ fn dependencies_for_context<'lock>(
                 .flatten(),
         ),
     }
+}
+
+fn edge_matches(left: &Edge, right: &Edge) -> bool {
+    match (left, right) {
+        (Edge::Prod, Edge::Prod) => true,
+        (Edge::Optional(left), Edge::Optional(right)) => left == right,
+        (Edge::Dev(left), Edge::Dev(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn marker_extras_for_package<'lock>(
+    package: &'lock Package,
+    context: &'lock DependencyContext,
+    activated_extras: &[(&'lock PackageName, &'lock ExtraName)],
+) -> Vec<&'lock ExtraName> {
+    activated_extras
+        .iter()
+        .filter_map(|(package_name, extra)| (*package_name == &package.id.name).then_some(*extra))
+        .chain(context.marker_extras())
+        .collect()
 }
 
 fn dependency_contexts<'lock>(
@@ -298,25 +321,23 @@ trait InstallableExt<'lock>: Installable<'lock> {
         // marker. But at that point, we don't know the full set of activated extras; this is only
         // computed below. We somehow need to add the dependency groups _after_ we've computed all
         // enabled extras, but the groups themselves could depend on the set of enabled extras.
-        if has_conflicts {
-            for dist in roots.iter().copied() {
-                // Track the activated extras.
-                if groups.prod() {
-                    activated_projects.push(&dist.id.name);
-                    let available_extras = package_provided_extra_names(self.lock(), dist);
-                    for extra in extras.extra_names(available_extras) {
-                        activated_extras.push((&dist.id.name, extra));
-                    }
+        for dist in roots.iter().copied() {
+            // Track the activated extras.
+            if groups.prod() {
+                activated_projects.push(&dist.id.name);
+                let available_extras = package_provided_extra_names(self.lock(), dist);
+                for extra in extras.extra_names(available_extras) {
+                    activated_extras.push((&dist.id.name, extra));
                 }
+            }
 
-                // Track the activated groups.
-                for group in dist
-                    .dependency_groups
-                    .keys()
-                    .filter(|group| groups.contains(group))
-                {
-                    activated_groups.push((&dist.id.name, group));
-                }
+            // Track the activated groups.
+            for group in dist
+                .dependency_groups
+                .keys()
+                .filter(|group| groups.contains(group))
+            {
+                activated_groups.push((&dist.id.name, group));
             }
         }
 
@@ -570,8 +591,9 @@ trait InstallableExt<'lock>: Installable<'lock> {
         // up our resolution graph. In the first traversal, we accumulate all
         // activated extras. This includes the extras explicitly enabled on
         // the CLI (which were gathered above) and the extras enabled via
-        // dependency specifications like `foo[extra]`. We need to do this
-        // to correctly support conflicting extras.
+        // dependency specifications like `foo[extra]`. We need to do this to evaluate package-local
+        // `extra` markers against the complete active extra set, and to correctly support
+        // conflicting extras.
         //
         // In particular, the way conflicting extras works is by forking the
         // resolver based on the extras that are declared as conflicting. But
@@ -583,21 +605,20 @@ trait InstallableExt<'lock>: Installable<'lock> {
         // extra is enabled, and the former is specifically *not* enabled
         // when the `cpu` extra is enabled.
         //
-        // In order to evaluate these conflict markers correctly, we need to
-        // know whether the `cpu` extra is enabled when we visit the `torch`
-        // dependency. If we think it's disabled, then we'll erroneously
-        // include it if the extra is actually enabled. But in order to tell
-        // if it's enabled, we need to traverse the entire dependency graph
-        // first to inspect which extras are enabled!
+        // In order to evaluate these conflict markers correctly, we need to know whether the `cpu`
+        // extra is enabled when we visit the `torch` dependency. The same applies to regular
+        // package-local markers like `extra != "gpu"`, which can only be evaluated once transitive
+        // dependency specifications have activated their extras. If we think an extra is disabled,
+        // then we'll erroneously include a dependency if the extra is actually enabled. But in
+        // order to tell if it's enabled, we need to traverse the dependency graph first to inspect
+        // which extras are enabled.
         //
-        // Of course, we don't need to do this at all if there aren't any
-        // conflicts. In which case, we skip all of this and just do the one
-        // traversal below.
-        if has_conflicts {
-            let mut activated_extras_set: BTreeSet<(&PackageName, &ExtraName)> =
-                activated_extras.iter().copied().collect();
+        let mut activated_extras_set: BTreeSet<(&PackageName, &ExtraName)> =
+            activated_extras.iter().copied().collect();
+        loop {
+            let previous_len = activated_extras_set.len();
             let mut queue = queue.clone();
-            let mut reachability = conflict_reachability;
+            let mut reachability = conflict_reachability.clone();
             while let Some((package, context)) = queue.pop_front() {
                 let Some(parent_reachability) =
                     reachability.get(&(&package.id, context.clone())).copied()
@@ -610,9 +631,11 @@ trait InstallableExt<'lock>: Installable<'lock> {
                     dep_reachability.and(parent_reachability);
                     let additional_activated_extras =
                         newly_activated_extras(dep, &activated_extras);
+                    let marker_extras =
+                        marker_extras_for_package(package, &context, &activated_extras);
                     if !dep_reachability.evaluate_with_marker_extras(
                         marker_env,
-                        context.marker_extras(),
+                        marker_extras.iter().copied(),
                         activated_projects.iter().copied(),
                         activated_extras
                             .iter()
@@ -631,8 +654,9 @@ trait InstallableExt<'lock>: Installable<'lock> {
                     // extra and cause the conflict check below to report a false positive.
 
                     for key in additional_activated_extras {
-                        activated_extras_set.insert(key);
-                        activated_extras.push(key);
+                        if activated_extras_set.insert(key) {
+                            activated_extras.push(key);
+                        }
                     }
                     let dep_dist = self.lock().find_by_id(&dep.package_id);
                     // Push its dependencies on the queue.
@@ -647,6 +671,13 @@ trait InstallableExt<'lock>: Installable<'lock> {
                     }
                 }
             }
+
+            if activated_extras_set.len() == previous_len {
+                break;
+            }
+        }
+
+        if has_conflicts {
             // At time of writing, it's somewhat expected that the set of
             // conflicting extras is pretty small. With that said, the
             // time complexity of the following routine is pretty gross.
@@ -676,12 +707,25 @@ trait InstallableExt<'lock>: Installable<'lock> {
         }
 
         while let Some((package, context)) = queue.pop_front() {
+            if let DependencyContext::Base(_) = &context {
+                for (_, extra) in activated_extras
+                    .iter()
+                    .filter(|(package_name, _)| *package_name == &package.id.name)
+                {
+                    let context = DependencyContext::Optional((*extra).clone());
+                    if seen.insert((&package.id, context.clone())) {
+                        queue.push_back((package, context));
+                    }
+                }
+            }
+
             let deps = dependencies_for_context(package, &context);
             for dep in deps {
                 if validate_conflicts && dep.complexified_marker.has_conflict_marker() {
                     dependencies_for_conflict_validation.push((package, dep));
                 }
                 if !evaluate_dependency_marker(
+                    package,
                     dep,
                     &context,
                     marker_env,
@@ -712,15 +756,17 @@ trait InstallableExt<'lock>: Installable<'lock> {
 
                 // Add the edge.
                 let index = inverse[&package.id];
-                petgraph.add_edge(
-                    index,
-                    dep_index,
-                    if let Some(extra) = context.required_extra() {
-                        Edge::Optional(extra.clone())
-                    } else {
-                        Edge::Prod
-                    },
-                );
+                let edge = if let Some(extra) = context.required_extra() {
+                    Edge::Optional(extra.clone())
+                } else {
+                    Edge::Prod
+                };
+                if !petgraph
+                    .edges_connecting(index, dep_index)
+                    .any(|existing| edge_matches(existing.weight(), &edge))
+                {
+                    petgraph.add_edge(index, dep_index, edge);
+                }
 
                 // Push its dependencies on the queue.
                 for context in dependency_contexts(&dep.extra) {

@@ -31,6 +31,29 @@ impl From<PubGrubPackageInner> for PubGrubPackage {
     }
 }
 
+/// The package-local extras requested on an extras proxy.
+#[derive(Debug, Clone, Eq, Hash, PartialEq, PartialOrd, Ord)]
+pub struct ExtraSet(Box<[ExtraName]>);
+
+impl ExtraSet {
+    pub(crate) fn new(extras: Box<[ExtraName]>) -> Self {
+        let mut extras = Vec::from(extras);
+        extras.sort();
+        extras.dedup();
+        Self(extras.into_boxed_slice())
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &ExtraName> {
+        self.0.iter()
+    }
+}
+
+impl From<Box<[ExtraName]>> for ExtraSet {
+    fn from(extras: Box<[ExtraName]>) -> Self {
+        Self::new(extras)
+    }
+}
+
 /// A PubGrub-compatible wrapper around a "Python package", with two notable characteristics:
 ///
 /// 1. Includes a [`PubGrubPackage::Root`] variant, to satisfy PubGrub's requirement that a
@@ -74,10 +97,10 @@ pub enum PubGrubPackageInner {
         extra: ExtraName,
         marker: MarkerTree,
     },
-    /// A proxy package to represent a dependency with multiple extras.
+    /// A proxy package to represent a dependency with one or more extras.
     Extras {
         name: PackageName,
-        extras: Box<[ExtraName]>,
+        extras: ExtraSet,
         marker: MarkerTree,
     },
     /// A proxy package to represent an enabled dependency group.
@@ -142,7 +165,7 @@ impl PubGrubPackage {
     ) -> Self {
         Self(Arc::new(PubGrubPackageInner::Extras {
             name,
-            extras,
+            extras: ExtraSet::from(extras),
             marker,
         }))
     }

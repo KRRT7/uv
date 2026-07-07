@@ -10367,9 +10367,8 @@ fn sync_negative_extra_transitive_self_extra() -> Result<()> {
 
     ----- stderr -----
     Resolved 3 packages in [TIME]
-    Prepared 3 packages in [TIME]
-    Installed 3 packages in [TIME]
-     + cpu-only==1.0.0 (from file://[TEMP_DIR]/cpu_only)
+    Prepared 2 packages in [TIME]
+    Installed 2 packages in [TIME]
      + gpu-only==1.0.0 (from file://[TEMP_DIR]/gpu_only)
      + project==1.0.0 (from file://[TEMP_DIR]/)
     ");
@@ -10566,9 +10565,8 @@ fn sync_negative_extra_incremental_valid_install() -> Result<()> {
 
     ----- stderr -----
     Resolved 5 packages in [TIME]
-    Prepared 4 packages in [TIME]
-    Installed 4 packages in [TIME]
-     + ancient==1.0.0 (from file://[TEMP_DIR]/ancient)
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
      + docs-theme==1.0.0 (from file://[TEMP_DIR]/docs_theme)
      + plugin==1.0.0 (from file://[TEMP_DIR]/plugin)
      + project==1.0.0 (from file://[TEMP_DIR]/)
