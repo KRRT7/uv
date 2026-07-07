@@ -10748,6 +10748,15 @@ fn sync_negative_extra_transitive_requested_extra() -> Result<()> {
      + project==1.0.0 (from file://[TEMP_DIR]/)
     ");
 
+    uv_snapshot!(context.filters(), context.lock().arg("--locked"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 4 packages in [TIME]
+    ");
+
     Ok(())
 }
 
@@ -10889,6 +10898,481 @@ fn sync_negative_extra_transitive_extra_union() -> Result<()> {
      + library==1.0.0 (from file://[TEMP_DIR]/library)
      + plugin==1.0.0 (from file://[TEMP_DIR]/plugin)
      + project==1.0.0 (from file://[TEMP_DIR]/)
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn sync_negative_extra_non_extra_marker() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    context.temp_dir.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "project"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["library[docs]"]
+
+        [tool.uv.sources]
+        docs-runtime = { workspace = true }
+        library = { workspace = true }
+        python-guarded = { workspace = true }
+
+        [tool.uv.workspace]
+        members = ["docs_runtime", "library", "python_guarded"]
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    context.temp_dir.child("src/project/__init__.py").touch()?;
+
+    let library = context.temp_dir.child("library");
+    library.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "library"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["python-guarded ; extra != 'gpu' and python_version < '3.12'"]
+
+        [project.optional-dependencies]
+        docs = ["docs-runtime"]
+        gpu = []
+
+        [tool.uv.sources]
+        docs-runtime = { workspace = true }
+        python-guarded = { workspace = true }
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    library.child("src/library/__init__.py").touch()?;
+
+    let docs_runtime = context.temp_dir.child("docs_runtime");
+    docs_runtime.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "docs-runtime"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    docs_runtime.child("src/docs_runtime/__init__.py").touch()?;
+
+    let python_guarded = context.temp_dir.child("python_guarded");
+    python_guarded.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "python-guarded"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    python_guarded
+        .child("src/python_guarded/__init__.py")
+        .touch()?;
+
+    uv_snapshot!(context.filters(), context.sync(), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 4 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + docs-runtime==1.0.0 (from file://[TEMP_DIR]/docs_runtime)
+     + library==1.0.0 (from file://[TEMP_DIR]/library)
+     + project==1.0.0 (from file://[TEMP_DIR]/)
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn sync_negative_extra_declared_conflict() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    context.temp_dir.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "project"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["library[gpu]"]
+
+        [tool.uv]
+        conflicts = [[
+            { package = "library", extra = "cpu" },
+            { package = "library", extra = "gpu" },
+        ]]
+
+        [tool.uv.sources]
+        cpu-runtime = { workspace = true }
+        default-runtime = { workspace = true }
+        gpu-runtime = { workspace = true }
+        library = { workspace = true }
+
+        [tool.uv.workspace]
+        members = ["cpu_runtime", "default_runtime", "gpu_runtime", "library"]
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    context.temp_dir.child("src/project/__init__.py").touch()?;
+
+    let library = context.temp_dir.child("library");
+    library.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "library"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["default-runtime ; extra != 'gpu'"]
+
+        [project.optional-dependencies]
+        cpu = ["cpu-runtime"]
+        gpu = ["gpu-runtime"]
+
+        [tool.uv.sources]
+        cpu-runtime = { workspace = true }
+        default-runtime = { workspace = true }
+        gpu-runtime = { workspace = true }
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    library.child("src/library/__init__.py").touch()?;
+
+    let cpu_runtime = context.temp_dir.child("cpu_runtime");
+    cpu_runtime.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "cpu-runtime"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    cpu_runtime.child("src/cpu_runtime/__init__.py").touch()?;
+
+    let default_runtime = context.temp_dir.child("default_runtime");
+    default_runtime.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "default-runtime"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    default_runtime
+        .child("src/default_runtime/__init__.py")
+        .touch()?;
+
+    let gpu_runtime = context.temp_dir.child("gpu_runtime");
+    gpu_runtime.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "gpu-runtime"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    gpu_runtime.child("src/gpu_runtime/__init__.py").touch()?;
+
+    uv_snapshot!(context.filters(), context.sync(), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 5 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + gpu-runtime==1.0.0 (from file://[TEMP_DIR]/gpu_runtime)
+     + library==1.0.0 (from file://[TEMP_DIR]/library)
+     + project==1.0.0 (from file://[TEMP_DIR]/)
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn sync_negative_extra_dependency_group() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    context.temp_dir.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "project"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [dependency-groups]
+        accelerator = ["library[gpu]"]
+
+        [tool.uv.sources]
+        cpu-runtime = { workspace = true }
+        gpu-runtime = { workspace = true }
+        library = { workspace = true }
+
+        [tool.uv.workspace]
+        members = ["cpu_runtime", "gpu_runtime", "library"]
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    context.temp_dir.child("src/project/__init__.py").touch()?;
+
+    let library = context.temp_dir.child("library");
+    library.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "library"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["cpu-runtime ; extra != 'gpu'"]
+
+        [project.optional-dependencies]
+        gpu = ["gpu-runtime"]
+
+        [tool.uv.sources]
+        cpu-runtime = { workspace = true }
+        gpu-runtime = { workspace = true }
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    library.child("src/library/__init__.py").touch()?;
+
+    let cpu_runtime = context.temp_dir.child("cpu_runtime");
+    cpu_runtime.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "cpu-runtime"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    cpu_runtime.child("src/cpu_runtime/__init__.py").touch()?;
+
+    let gpu_runtime = context.temp_dir.child("gpu_runtime");
+    gpu_runtime.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "gpu-runtime"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    gpu_runtime.child("src/gpu_runtime/__init__.py").touch()?;
+
+    uv_snapshot!(context.filters(), context.sync().arg("--group").arg("accelerator"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 4 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + gpu-runtime==1.0.0 (from file://[TEMP_DIR]/gpu_runtime)
+     + library==1.0.0 (from file://[TEMP_DIR]/library)
+     + project==1.0.0 (from file://[TEMP_DIR]/)
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn sync_negative_extra_multiple_negative_extras() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    context.temp_dir.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "project"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = [
+            "library[gpu]",
+            "plugin",
+        ]
+
+        [tool.uv.sources]
+        default-runtime = { workspace = true }
+        gpu-runtime = { workspace = true }
+        library = { workspace = true }
+        plugin = { workspace = true }
+        tpu-runtime = { workspace = true }
+
+        [tool.uv.workspace]
+        members = ["default_runtime", "gpu_runtime", "library", "plugin", "tpu_runtime"]
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    context.temp_dir.child("src/project/__init__.py").touch()?;
+
+    let plugin = context.temp_dir.child("plugin");
+    plugin.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "plugin"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["library[tpu]"]
+
+        [tool.uv.sources]
+        library = { workspace = true }
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    plugin.child("src/plugin/__init__.py").touch()?;
+
+    let library = context.temp_dir.child("library");
+    library.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "library"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = ["default-runtime ; extra != 'gpu' and extra != 'tpu'"]
+
+        [project.optional-dependencies]
+        gpu = ["gpu-runtime"]
+        tpu = ["tpu-runtime"]
+
+        [tool.uv.sources]
+        default-runtime = { workspace = true }
+        gpu-runtime = { workspace = true }
+        tpu-runtime = { workspace = true }
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    library.child("src/library/__init__.py").touch()?;
+
+    let default_runtime = context.temp_dir.child("default_runtime");
+    default_runtime.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "default-runtime"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    default_runtime
+        .child("src/default_runtime/__init__.py")
+        .touch()?;
+
+    let gpu_runtime = context.temp_dir.child("gpu_runtime");
+    gpu_runtime.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "gpu-runtime"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    gpu_runtime.child("src/gpu_runtime/__init__.py").touch()?;
+
+    let tpu_runtime = context.temp_dir.child("tpu_runtime");
+    tpu_runtime.child("pyproject.toml").write_str(
+        r#"
+        [project]
+        name = "tpu-runtime"
+        version = "1.0.0"
+        requires-python = ">=3.12"
+        dependencies = []
+
+        [build-system]
+        requires = ["uv_build>=0.9.0,<10000"]
+        build-backend = "uv_build"
+        "#,
+    )?;
+    tpu_runtime.child("src/tpu_runtime/__init__.py").touch()?;
+
+    uv_snapshot!(context.filters(), context.sync(), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 6 packages in [TIME]
+    Prepared 5 packages in [TIME]
+    Installed 5 packages in [TIME]
+     + gpu-runtime==1.0.0 (from file://[TEMP_DIR]/gpu_runtime)
+     + library==1.0.0 (from file://[TEMP_DIR]/library)
+     + plugin==1.0.0 (from file://[TEMP_DIR]/plugin)
+     + project==1.0.0 (from file://[TEMP_DIR]/)
+     + tpu-runtime==1.0.0 (from file://[TEMP_DIR]/tpu_runtime)
     ");
 
     Ok(())
