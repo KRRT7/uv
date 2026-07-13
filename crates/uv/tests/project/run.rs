@@ -1147,7 +1147,9 @@ fn run_pep723_script_lock() -> Result<()> {
 
     ----- stderr -----
     Resolved 3 packages in [TIME]
-    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`.
+    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.
+
+    hint: To update the lockfile, run `uv lock`.
     ");
 
     // Re-running the script with `--frozen` should also error, but at runtime.
@@ -2645,7 +2647,9 @@ fn run_locked() -> Result<()> {
 
     ----- stderr -----
     Resolved 2 packages in [TIME]
-    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`.
+    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.
+
+    hint: To update the lockfile, run `uv lock`.
     ");
 
     let updated = context.read("uv.lock");
@@ -4241,10 +4245,10 @@ fn run_invalid_project_table() -> Result<()> {
     ----- stderr -----
     error: Failed to parse: `pyproject.toml`
       Caused by: TOML parse error at line 1, column 2
-      |
-    1 | [project.urls]
-      |  ^^^^^^^
-    `pyproject.toml` is using the `[project]` table, but the required `project.name` field is not set
+          |
+        1 | [project.urls]
+          |  ^^^^^^^
+        `pyproject.toml` is using the `[project]` table, but the required `project.name` field is not set
     ");
 
     Ok(())
@@ -5279,6 +5283,23 @@ fn run_with_not_existing_env_file() -> Result<()> {
 
     ----- stderr -----
     error: No environment file found at: `.env.development`
+    ");
+
+    uv_snapshot!(context.filters(), context.run().arg("--env-file").arg(".env.development").arg("--quiet").arg("test.py"), @"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: No environment file found at: `.env.development`
+    ");
+
+    uv_snapshot!(context.filters(), context.run().arg("--env-file").arg(".env.development").arg("--quiet").arg("--quiet").arg("test.py"), @"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
     ");
 
     Ok(())

@@ -295,16 +295,14 @@ pub(crate) async fn check(
         {
             Ok(result) => result,
             Err(ProjectError::Operation(err)) => {
-                return diagnostics::OperationDiagnostic::with_system_certs(
-                    client_builder.system_certs(),
-                )
-                .report(err)
-                .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                return diagnostics::OperationDiagnostic::default()
+                    .report(err)
+                    .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
             }
             Err(err) => return Err(err.into()),
         };
 
-        let marker_environment = venv.interpreter().resolver_marker_environment();
+        let marker_environment = venv.interpreter().to_resolver_marker_environment();
         if ty_path.is_none()
             && ty_version.is_none()
             && result
@@ -354,11 +352,9 @@ pub(crate) async fn check(
         {
             Ok(_) => {}
             Err(ProjectError::Operation(err)) => {
-                return diagnostics::OperationDiagnostic::with_system_certs(
-                    client_builder.system_certs(),
-                )
-                .report(err)
-                .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                return diagnostics::OperationDiagnostic::default()
+                    .report(err)
+                    .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
             }
             Err(err) => return Err(err.into()),
         }
@@ -488,11 +484,9 @@ pub(crate) async fn check(
         {
             Ok(result) => result,
             Err(ProjectError::Operation(err)) => {
-                return diagnostics::OperationDiagnostic::with_system_certs(
-                    client_builder.system_certs(),
-                )
-                .report(err)
-                .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                return diagnostics::OperationDiagnostic::default()
+                    .report(err)
+                    .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
             }
             Err(err) => return Err(err.into()),
         };
@@ -536,7 +530,7 @@ pub(crate) async fn check(
                 let resolution = project::toolchain::resolution_from_lock(
                     project,
                     result.lock(),
-                    tool.package(),
+                    &tool,
                     &base_interpreter,
                     &settings.resolver.build_options,
                 )?;
@@ -562,11 +556,9 @@ pub(crate) async fn check(
                 {
                     Ok(environment) => environment,
                     Err(ProjectError::Operation(err)) => {
-                        return diagnostics::OperationDiagnostic::with_system_certs(
-                            client_builder.system_certs(),
-                        )
-                        .report(err)
-                        .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                        return diagnostics::OperationDiagnostic::default()
+                            .report(err)
+                            .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
                     }
                     Err(err) => return Err(err.into()),
                 };
@@ -606,11 +598,9 @@ pub(crate) async fn check(
             {
                 Ok(_) => {}
                 Err(ProjectError::Operation(err)) => {
-                    return diagnostics::OperationDiagnostic::with_system_certs(
-                        client_builder.system_certs(),
-                    )
-                    .report(err)
-                    .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                    return diagnostics::OperationDiagnostic::default()
+                        .report(err)
+                        .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
                 }
                 Err(err) => return Err(err.into()),
             }

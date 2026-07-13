@@ -9891,7 +9891,7 @@ fn add_shadowed_name() -> Result<()> {
 
     ----- stderr -----
       × No solution found when resolving dependencies:
-      ╰─▶ Because dagster-webserver==1.6.13 depends on your project and your project depends on dagster-webserver==1.6.13, we can conclude that your project's requirements are unsatisfiable.
+      ╰─▶ Because dagster-webserver>=1.6.13 depends on your project and your project depends on dagster-webserver==1.6.13, we can conclude that your project's requirements are unsatisfiable.
 
     hint: The package `dagster-webserver` depends on the package `dagster` but the name is shadowed by your project. Consider changing the name of the project.
     hint: If you want to add the package regardless of the failed resolution, provide the `--frozen` flag to skip locking and syncing
@@ -9905,13 +9905,8 @@ fn add_shadowed_name() -> Result<()> {
 
     ----- stderr -----
       × No solution found when resolving dependencies:
-      ╰─▶ Because only the following versions of dagster-webserver are available:
-              dagster-webserver<=1.6.11
-              dagster-webserver==1.6.12
-              dagster-webserver==1.6.13
-          and dagster-webserver==1.6.11 depends on your project, we can conclude that dagster-webserver>=1.6.11,<1.6.12 depends on your project.
-          And because dagster-webserver==1.6.12 depends on your project, we can conclude that dagster-webserver>=1.6.11,<1.6.13 depends on your project.
-          And because dagster-webserver==1.6.13 depends on your project and your project depends on dagster-webserver>=1.6.11, we can conclude that your project's requirements are unsatisfiable.
+      ╰─▶ Because dagster-webserver==1.6.11 depends on your project and dagster-webserver==1.6.12 depends on your project, we can conclude that dagster-webserver>=1.6.11,<=1.6.12 depends on your project.
+          And because dagster-webserver>=1.6.13 depends on your project and your project depends on dagster-webserver>=1.6.11, we can conclude that your project's requirements are unsatisfiable.
 
     hint: The package `dagster-webserver` depends on the package `dagster` but the name is shadowed by your project. Consider changing the name of the project.
     hint: If you want to add the package regardless of the failed resolution, provide the `--frozen` flag to skip locking and syncing
@@ -13477,8 +13472,8 @@ fn add_unsupported_git_scheme() {
     ----- stderr -----
     error: Failed to parse: `git+fantasy://ferris/dreams/of/urls@7701ffcbae245819b828dc5f885a5201158897ef`
       Caused by: Unsupported Git URL scheme `fantasy:` in `fantasy://ferris/dreams/of/urls` (expected one of `https:`, `ssh:`, or `file:`)
-    git+fantasy://ferris/dreams/of/urls@7701ffcbae245819b828dc5f885a5201158897ef
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        git+fantasy://ferris/dreams/of/urls@7701ffcbae245819b828dc5f885a5201158897ef
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     ");
 }
 
@@ -13799,8 +13794,8 @@ async fn lock_forbidden_index_with_available_package() -> Result<()> {
 
     ----- stderr -----
       × No solution found when resolving dependencies:
-      ╰─▶ Because idna was not found in the package registry and anyio==4.3.0 depends on idna>=2.8, we can conclude that anyio==4.3.0 cannot be used.
-          And because only anyio==4.3.0 is available and your project depends on anyio, we can conclude that your project's requirements are unsatisfiable.
+      ╰─▶ Because idna was not found in the package registry and all versions of anyio depend on idna>=2.8, we can conclude that all versions of anyio cannot be used.
+          And because your project depends on anyio, we can conclude that your project's requirements are unsatisfiable.
 
     hint: An index (http://[LOCALHOST]/) returned a 403 Forbidden error, but uv received a successful response from another request to the index. If the failing package is not present on this index, consider adding `ignore-error-codes = [403]` to the index's `[[tool.uv.index]]` entry to continue searching across indexes.
     ");
@@ -13921,10 +13916,10 @@ async fn add_invalid_ignore_error_code() -> Result<()> {
 
     error: Failed to parse: `pyproject.toml`
       Caused by: TOML parse error at line 9, column 22
-      |
-    9 | ignore-error-codes = [401, 403, 1234]
-      |                      ^^^^^^^^^^^^^^^^
-    1234 is not a valid HTTP status code
+          |
+        9 | ignore-error-codes = [401, 403, 1234]
+          |                      ^^^^^^^^^^^^^^^^
+        1234 is not a valid HTTP status code
     "
     );
 
@@ -13955,12 +13950,12 @@ fn add_invalid_requires_python() -> Result<()> {
     ----- stderr -----
     error: Failed to parse: `pyproject.toml`
       Caused by: TOML parse error at line 4, column 19
-      |
-    4 | requires-python = "3.12"
-      |                   ^^^^^^
-    Failed to parse version: Unexpected end of version specifier, expected operator. Did you mean `==3.12`?:
-    3.12
-    ^^^^
+          |
+        4 | requires-python = "3.12"
+          |                   ^^^^^^
+        Failed to parse version: Unexpected end of version specifier, expected operator. Did you mean `==3.12`?:
+        3.12
+        ^^^^
     "#);
 
     Ok(())

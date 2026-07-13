@@ -186,7 +186,8 @@ impl<'a, C, W> ErrorOptions<'a, C, W> {
     /// Override the terminal width used for wrapping.
     ///
     /// This is primarily useful for testing.
-    pub fn with_width_override(mut self, width_override: usize) -> Self {
+    #[cfg(test)]
+    fn with_width_override(mut self, width_override: usize) -> Self {
         self.width_override = Some(width_override);
         self
     }
@@ -208,6 +209,25 @@ pub fn write_error_chain(err: &dyn Error, hints: Hints<'_>) -> fmt::Result {
     write_error_chain_with_options(err, hints, ErrorOptions::default())
 }
 
+/// Format the [`Debug`] representation of every error in an error chain.
+pub fn debug_error_chain(err: &dyn Error) -> impl fmt::Display + '_ {
+    DebugErrorChain(err)
+}
+
+struct DebugErrorChain<'a>(&'a dyn Error);
+
+impl fmt::Display for DebugErrorChain<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, error) in iter::successors(Some(self.0), |&error| error.source()).enumerate() {
+            if index > 0 {
+                formatter.write_str("\n")?;
+            }
+            write!(formatter, "{index}: {error:?}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Formats an error or warning chain with custom options.
 ///
 /// Each hint is rendered on its own line, prefixed with the styled `hint:` label.
@@ -226,7 +246,7 @@ pub fn write_error_chain_with_options<C: DynColor + Copy, W: fmt::Write>(
 
     let main_msg = err.to_string();
     let main_padding = " ".repeat(level.len() + 2);
-    let wrapped_main = wrap_text(&main_msg, width, &main_padding, &main_padding);
+    let wrapped_main = wrap_text(&main_msg, width, &main_padding, &main_padding, "");
     writeln!(
         &mut stream,
         "{}{} {}",
@@ -240,8 +260,9 @@ pub fn write_error_chain_with_options<C: DynColor + Copy, W: fmt::Write>(
         let padding = "  ";
         let cause = "Caused by";
         let child_padding = " ".repeat(padding.len() + cause.len() + 2);
+        let authored_line_padding = "    ";
 
-        let wrapped = wrap_text(&msg, width, "", &child_padding);
+        let wrapped = wrap_text(&msg, width, "", &child_padding, authored_line_padding);
 
         let mut lines = wrapped.lines();
         if let Some(first) = lines.next() {
@@ -276,7 +297,10 @@ mod tests {
     use insta::assert_snapshot;
     use owo_colors::AnsiColors;
 
-    use super::{ErrorOptions, ErrorWithHints, HintPrefix, Hints, write_error_chain_with_options};
+    use super::{
+        ErrorOptions, ErrorWithHints, HintPrefix, Hints, debug_error_chain,
+        write_error_chain_with_options,
+    };
 
     #[test]
     fn extend_deduplicates_matching_hints() {
@@ -366,6 +390,31 @@ mod tests {
         error: Failed to write file
           Caused by: Permission denied
         ");
+    }
+
+    #[test]
+    fn formats_debug_error_chain() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("inner error")]
+        struct InnerError {
+            code: u8,
+        }
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("outer error")]
+        struct OuterError {
+            #[source]
+            source: InnerError,
+        }
+
+        let error = OuterError {
+            source: InnerError { code: 42 },
+        };
+
+        assert_eq!(
+            debug_error_chain(&error).to_string(),
+            "0: OuterError { source: InnerError { code: 42 } }\n1: InnerError { code: 42 }"
+        );
     }
 
     #[test]
@@ -582,9 +631,9 @@ mod tests {
         assert_snapshot!(rendered, @r"
         error: Failed to download Python 3.12
           Caused by: Failed to fetch https://example.com/upload/python3.13.tar.zst
-        Server says: This endpoint only support POST requests.
+            Server says: This endpoint only support POST requests.
 
-        For downloads, please refer to https://example.com/download/python3.13.tar.zst
+            For downloads, please refer to https://example.com/download/python3.13.tar.zst
           Caused by: Caused By: HTTP Error 400
         ");
     }

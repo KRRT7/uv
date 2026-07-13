@@ -4,6 +4,8 @@ use std::ffi::OsString;
 use std::fmt::Write;
 use std::io;
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
@@ -261,12 +263,10 @@ pub(crate) async fn run(
             {
                 Ok(result) => result.into_lock(),
                 Err(ProjectError::Operation(err)) => {
-                    return diagnostics::OperationDiagnostic::with_system_certs(
-                        client_builder.system_certs(),
-                    )
-                    .with_context("script")
-                    .report(err)
-                    .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                    return diagnostics::OperationDiagnostic::default()
+                        .with_context("script")
+                        .report(err)
+                        .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
                 }
                 Err(err) => return Err(err.into()),
             };
@@ -309,12 +309,10 @@ pub(crate) async fn run(
             {
                 Ok(_) => {}
                 Err(ProjectError::Operation(err)) => {
-                    return diagnostics::OperationDiagnostic::with_system_certs(
-                        client_builder.system_certs(),
-                    )
-                    .with_context("script")
-                    .report(err)
-                    .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                    return diagnostics::OperationDiagnostic::default()
+                        .with_context("script")
+                        .report(err)
+                        .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
                 }
                 Err(err) => return Err(err.into()),
             }
@@ -448,12 +446,10 @@ pub(crate) async fn run(
                 {
                     Ok(update) => Some(update.into_environment().into_interpreter()),
                     Err(ProjectError::Operation(err)) => {
-                        return diagnostics::OperationDiagnostic::with_system_certs(
-                            client_builder.system_certs(),
-                        )
-                        .with_context("script")
-                        .report(err)
-                        .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                        return diagnostics::OperationDiagnostic::default()
+                            .with_context("script")
+                            .report(err)
+                            .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
                     }
                     Err(err) => return Err(err.into()),
                 }
@@ -775,11 +771,9 @@ pub(crate) async fn run(
                 {
                     Ok(result) => result,
                     Err(ProjectError::Operation(err)) => {
-                        return diagnostics::OperationDiagnostic::with_system_certs(
-                            client_builder.system_certs(),
-                        )
-                        .report(err)
-                        .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                        return diagnostics::OperationDiagnostic::default()
+                            .report(err)
+                            .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
                     }
                     Err(err) => return Err(err.into()),
                 };
@@ -864,11 +858,9 @@ pub(crate) async fn run(
                 {
                     Ok(_) => {}
                     Err(ProjectError::Operation(err)) => {
-                        return diagnostics::OperationDiagnostic::with_system_certs(
-                            client_builder.system_certs(),
-                        )
-                        .report(err)
-                        .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                        return diagnostics::OperationDiagnostic::default()
+                            .report(err)
+                            .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
                     }
                     Err(err) => return Err(err.into()),
                 }
@@ -1018,12 +1010,10 @@ pub(crate) async fn run(
             let environment = match result {
                 Ok(resolution) => resolution,
                 Err(ProjectError::Operation(err)) => {
-                    return diagnostics::OperationDiagnostic::with_system_certs(
-                        client_builder.system_certs(),
-                    )
-                    .with_context("`--with`")
-                    .report(err)
-                    .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                    return diagnostics::OperationDiagnostic::default()
+                        .with_context("`--with`")
+                        .report(err)
+                        .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
                 }
                 Err(err) => return Err(err.into()),
             };
@@ -1341,7 +1331,7 @@ fn can_skip_ephemeral(
     }
 
     // Determine the markers and tags to use for resolution.
-    let markers = interpreter.resolver_marker_environment();
+    let markers = interpreter.to_resolver_marker_environment();
     let Ok(tags) = interpreter.tags() else {
         return false;
     };
@@ -1777,16 +1767,15 @@ impl RunCommand {
                 let mut process = Command::new(interpreter.sys_executable());
                 process.arg("-c");
 
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStringExt;
-                    process.arg(OsString::from_vec(script.clone()));
-                }
-
-                #[cfg(not(unix))]
-                {
-                    let script = String::from_utf8(script.clone()).expect("script is valid UTF-8");
-                    process.arg(script);
+                cfg_select! {
+                    unix => {
+                        process.arg(OsString::from_vec(script.clone()));
+                    },
+                    _ => {
+                        let script =
+                            String::from_utf8(script.clone()).expect("script is valid UTF-8");
+                        process.arg(script);
+                    },
                 }
                 process.args(args);
 
@@ -1809,16 +1798,15 @@ impl RunCommand {
                 let mut process = Command::new(&pythonw_executable);
                 process.arg("-c");
 
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStringExt;
-                    process.arg(OsString::from_vec(script.clone()));
-                }
-
-                #[cfg(not(unix))]
-                {
-                    let script = String::from_utf8(script.clone()).expect("script is valid UTF-8");
-                    process.arg(script);
+                cfg_select! {
+                    unix => {
+                        process.arg(OsString::from_vec(script.clone()));
+                    },
+                    _ => {
+                        let script =
+                            String::from_utf8(script.clone()).expect("script is valid UTF-8");
+                        process.arg(script);
+                    },
                 }
                 process.args(args);
 

@@ -785,9 +785,7 @@ pub(crate) async fn add(
             match err {
                 ProjectError::Operation(err) => {
                     let standard_library_hint = standard_library_hint(&err, &edits, python_minor);
-                    let diagnostic = diagnostics::OperationDiagnostic::with_system_certs(
-                        client_builder.system_certs(),
-                    );
+                    let diagnostic = diagnostics::OperationDiagnostic::default();
                     let diagnostic = if let Some(hint) = standard_library_hint {
                         diagnostic.with_hint(hint)
                     } else {
@@ -931,7 +929,7 @@ fn edits(
                 let credentials = uv_auth::Credentials::from_url(&git)?;
                 if let Some(credentials) = credentials {
                     debug!("Caching credentials for: {git}");
-                    store_credentials(RepositoryUrl::new(&git), credentials);
+                    store_credentials(RepositoryUrl::new(git.clone()), credentials);
 
                     // Redact the credentials.
                     git.remove_credentials();

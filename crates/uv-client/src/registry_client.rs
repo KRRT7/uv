@@ -460,7 +460,7 @@ impl RegistryClient {
         // unrelated indexes can proceed concurrently.
         let flat_index_slot = {
             let mut cache = self.flat_indexes.lock().await;
-            cache.get_or_insert(index)
+            cache.get_or_insert(index.clone())
         };
         let mut flat_index = flat_index_slot.lock().await;
 
@@ -526,17 +526,16 @@ impl RegistryClient {
             format!("{package_name}.rkyv"),
         );
         let cache_control = match self.connectivity {
-            Connectivity::Online => {
-                if let Some(header) = self.indexes.simple_api_cache_control_for(index) {
-                    CacheControl::Override(header)
-                } else {
-                    CacheControl::from(
-                        self.cache
-                            .freshness(&cache_entry, Some(package_name), None)
-                            .map_err(ErrorKind::Io)?,
-                    )
-                }
+            Connectivity::Online
+                if let Some(header) = self.indexes.simple_api_cache_control_for(index) =>
+            {
+                CacheControl::Override(header)
             }
+            Connectivity::Online => CacheControl::from(
+                self.cache
+                    .freshness(&cache_entry, Some(package_name), None)
+                    .map_err(ErrorKind::Io)?,
+            ),
             Connectivity::Offline => CacheControl::AllowStale,
         };
 
@@ -613,7 +612,9 @@ impl RegistryClient {
             .header("Accept-Encoding", "gzip, deflate, zstd")
             .header("Accept", accept)
             .build()
-            .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+            .map_err(|err| {
+                ErrorKind::from_reqwest(url.clone(), err, self.client.certificate_source())
+            })?;
         let parse_simple_response = |response: Response| {
             async {
                 // Use the response URL, rather than the request URL, as the base for relative URLs.
@@ -637,10 +638,13 @@ impl RegistryClient {
 
                 let unarchived = match media_type {
                     MediaType::PyxV1Msgpack => {
-                        let bytes = response
-                            .bytes()
-                            .await
-                            .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+                        let bytes = response.bytes().await.map_err(|err| {
+                            ErrorKind::from_reqwest(
+                                url.clone(),
+                                err,
+                                self.client.certificate_source(),
+                            )
+                        })?;
                         let data: PyxSimpleDetail = rmp_serde::from_slice(bytes.as_ref())
                             .map_err(|err| Error::from_msgpack_err(err, url.clone()))?;
 
@@ -653,10 +657,13 @@ impl RegistryClient {
                         )
                     }
                     MediaType::PyxV1Json => {
-                        let bytes = response
-                            .bytes()
-                            .await
-                            .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+                        let bytes = response.bytes().await.map_err(|err| {
+                            ErrorKind::from_reqwest(
+                                url.clone(),
+                                err,
+                                self.client.certificate_source(),
+                            )
+                        })?;
                         let data: PyxSimpleDetail = serde_json::from_slice(bytes.as_ref())
                             .map_err(|err| Error::from_json_err(err, url.clone()))?;
 
@@ -669,10 +676,13 @@ impl RegistryClient {
                         )
                     }
                     MediaType::PypiV1Json => {
-                        let bytes = response
-                            .bytes()
-                            .await
-                            .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+                        let bytes = response.bytes().await.map_err(|err| {
+                            ErrorKind::from_reqwest(
+                                url.clone(),
+                                err,
+                                self.client.certificate_source(),
+                            )
+                        })?;
 
                         let data: PypiSimpleDetail = serde_json::from_slice(bytes.as_ref())
                             .map_err(|err| Error::from_json_err(err, url.clone()))?;
@@ -685,10 +695,13 @@ impl RegistryClient {
                         )
                     }
                     MediaType::PypiV1Html | MediaType::TextHtml => {
-                        let text = response
-                            .text()
-                            .await
-                            .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+                        let text = response.text().await.map_err(|err| {
+                            ErrorKind::from_reqwest(
+                                url.clone(),
+                                err,
+                                self.client.certificate_source(),
+                            )
+                        })?;
                         SimpleDetailMetadata::from_html(&text, package_name, &url)?
                     }
                 };
@@ -786,17 +799,16 @@ impl RegistryClient {
             "index.html.rkyv",
         );
         let cache_control = match self.connectivity {
-            Connectivity::Online => {
-                if let Some(header) = self.indexes.simple_api_cache_control_for(index) {
-                    CacheControl::Override(header)
-                } else {
-                    CacheControl::from(
-                        self.cache
-                            .freshness(&cache_entry, None, None)
-                            .map_err(ErrorKind::Io)?,
-                    )
-                }
+            Connectivity::Online
+                if let Some(header) = self.indexes.simple_api_cache_control_for(index) =>
+            {
+                CacheControl::Override(header)
             }
+            Connectivity::Online => CacheControl::from(
+                self.cache
+                    .freshness(&cache_entry, None, None)
+                    .map_err(ErrorKind::Io)?,
+            ),
             Connectivity::Offline => CacheControl::AllowStale,
         };
 
@@ -823,37 +835,49 @@ impl RegistryClient {
 
                 let metadata = match media_type {
                     MediaType::PyxV1Msgpack => {
-                        let bytes = response
-                            .bytes()
-                            .await
-                            .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+                        let bytes = response.bytes().await.map_err(|err| {
+                            ErrorKind::from_reqwest(
+                                url.clone(),
+                                err,
+                                self.client.certificate_source(),
+                            )
+                        })?;
                         let data: PyxSimpleIndex = rmp_serde::from_slice(bytes.as_ref())
                             .map_err(|err| Error::from_msgpack_err(err, url.clone()))?;
                         SimpleIndexMetadata::from_pyx_index(data)
                     }
                     MediaType::PyxV1Json => {
-                        let bytes = response
-                            .bytes()
-                            .await
-                            .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+                        let bytes = response.bytes().await.map_err(|err| {
+                            ErrorKind::from_reqwest(
+                                url.clone(),
+                                err,
+                                self.client.certificate_source(),
+                            )
+                        })?;
                         let data: PyxSimpleIndex = serde_json::from_slice(bytes.as_ref())
                             .map_err(|err| Error::from_json_err(err, url.clone()))?;
                         SimpleIndexMetadata::from_pyx_index(data)
                     }
                     MediaType::PypiV1Json => {
-                        let bytes = response
-                            .bytes()
-                            .await
-                            .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+                        let bytes = response.bytes().await.map_err(|err| {
+                            ErrorKind::from_reqwest(
+                                url.clone(),
+                                err,
+                                self.client.certificate_source(),
+                            )
+                        })?;
                         let data: PypiSimpleIndex = serde_json::from_slice(bytes.as_ref())
                             .map_err(|err| Error::from_json_err(err, url.clone()))?;
                         SimpleIndexMetadata::from_pypi_index(data)
                     }
                     MediaType::PypiV1Html | MediaType::TextHtml => {
-                        let text = response
-                            .text()
-                            .await
-                            .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+                        let text = response.text().await.map_err(|err| {
+                            ErrorKind::from_reqwest(
+                                url.clone(),
+                                err,
+                                self.client.certificate_source(),
+                            )
+                        })?;
                         SimpleIndexMetadata::from_html(&text, &url)?
                     }
                 };
@@ -868,7 +892,9 @@ impl RegistryClient {
             .header("Accept-Encoding", "gzip, deflate, zstd")
             .header("Accept", accept)
             .build()
-            .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+            .map_err(|err| {
+                ErrorKind::from_reqwest(url.clone(), err, self.client.certificate_source())
+            })?;
 
         let index = self
             .cached_client()
@@ -1076,17 +1102,16 @@ impl RegistryClient {
                 format!("{}.msgpack", filename.cache_key()),
             );
             let cache_control = match self.connectivity {
-                Connectivity::Online => {
-                    if let Some(header) = self.indexes.artifact_cache_control_for(index) {
-                        CacheControl::Override(header)
-                    } else {
-                        CacheControl::from(
-                            self.cache
-                                .freshness(&cache_entry, Some(&filename.name), None)
-                                .map_err(ErrorKind::Io)?,
-                        )
-                    }
+                Connectivity::Online
+                    if let Some(header) = self.indexes.artifact_cache_control_for(index) =>
+                {
+                    CacheControl::Override(header)
                 }
+                Connectivity::Online => CacheControl::from(
+                    self.cache
+                        .freshness(&cache_entry, Some(&filename.name), None)
+                        .map_err(ErrorKind::Io)?,
+                ),
                 Connectivity::Offline => CacheControl::AllowStale,
             };
 
@@ -1098,10 +1123,9 @@ impl RegistryClient {
             };
 
             let response_callback = async |response: Response| {
-                let bytes = response
-                    .bytes()
-                    .await
-                    .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+                let bytes = response.bytes().await.map_err(|err| {
+                    ErrorKind::from_reqwest(url.clone(), err, self.client.certificate_source())
+                })?;
 
                 info_span!("parse_metadata21")
                     .in_scope(|| ResolutionMetadata::parse_metadata(bytes.as_ref()))
@@ -1117,7 +1141,9 @@ impl RegistryClient {
                 .uncached_client(&url)
                 .get(Url::from(url.clone()))
                 .build()
-                .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+                .map_err(|err| {
+                    ErrorKind::from_reqwest(url.clone(), err, self.client.certificate_source())
+                })?;
             Ok(self
                 .cached_client()
                 .get_serde_with_retry(req, &cache_entry, cache_control, response_callback)
@@ -1152,25 +1178,17 @@ impl RegistryClient {
             format!("{}.msgpack", filename.cache_key()),
         );
         let cache_control = match self.connectivity {
-            Connectivity::Online => {
-                if let Some(index) = index {
-                    if let Some(header) = self.indexes.artifact_cache_control_for(index) {
-                        CacheControl::Override(header)
-                    } else {
-                        CacheControl::from(
-                            self.cache
-                                .freshness(&cache_entry, Some(&filename.name), None)
-                                .map_err(ErrorKind::Io)?,
-                        )
-                    }
-                } else {
-                    CacheControl::from(
-                        self.cache
-                            .freshness(&cache_entry, Some(&filename.name), None)
-                            .map_err(ErrorKind::Io)?,
-                    )
-                }
+            Connectivity::Online
+                if let Some(index) = index
+                    && let Some(header) = self.indexes.artifact_cache_control_for(index) =>
+            {
+                CacheControl::Override(header)
             }
+            Connectivity::Online => CacheControl::from(
+                self.cache
+                    .freshness(&cache_entry, Some(&filename.name), None)
+                    .map_err(ErrorKind::Io)?,
+            ),
             Connectivity::Offline => CacheControl::AllowStale,
         };
 
@@ -1191,7 +1209,9 @@ impl RegistryClient {
                     http::HeaderValue::from_static("identity"),
                 )
                 .build()
-                .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+                .map_err(|err| {
+                    ErrorKind::from_reqwest(url.clone(), err, self.client.certificate_source())
+                })?;
 
             // Copy authorization headers from the HEAD request to subsequent requests
             let mut headers = HeaderMap::default();
@@ -1278,7 +1298,9 @@ impl RegistryClient {
                 reqwest::header::HeaderValue::from_static("identity"),
             )
             .build()
-            .map_err(|err| ErrorKind::from_reqwest(url.clone(), err))?;
+            .map_err(|err| {
+                ErrorKind::from_reqwest(url.clone(), err, self.client.certificate_source())
+            })?;
 
         // Stream the file, searching for the METADATA.
         let read_metadata_stream = |response: Response| {
@@ -1345,9 +1367,9 @@ struct FlatIndexCache(FxHashMap<IndexUrl, FlatIndexSlot>);
 
 impl FlatIndexCache {
     /// Return the per-index slot for this flat index, creating it on first access.
-    fn get_or_insert(&mut self, index: &IndexUrl) -> FlatIndexSlot {
+    fn get_or_insert(&mut self, index: IndexUrl) -> FlatIndexSlot {
         self.0
-            .entry(index.clone())
+            .entry(index)
             .or_insert_with(|| Arc::new(Mutex::new(None)))
             .clone()
     }
