@@ -10,7 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uv_small_str::SmallString;
 
 use crate::{
-    InvalidNameError, InvalidPipGroupError, InvalidPipGroupPathError, validate_and_normalize_ref,
+    InvalidNameError, InvalidPipGroupError, InvalidPipGroupPathError, validate_and_normalize_owned,
+    validate_and_normalize_ref,
 };
 
 /// The normalized name of a dependency group.
@@ -36,11 +37,8 @@ pub struct GroupName(SmallString);
 
 impl GroupName {
     /// Create a validated, normalized group name.
-    ///
-    /// At present, this is no more efficient than calling [`GroupName::from_str`].
-    #[expect(clippy::needless_pass_by_value)]
     fn from_owned(name: String) -> Result<Self, InvalidNameError> {
-        validate_and_normalize_ref(&name).map(Self)
+        validate_and_normalize_owned(name).map(Self)
     }
 
     /// Return the underlying group name as a string.
@@ -283,3 +281,44 @@ impl Default for DefaultGroups {
 /// `dev-dependencies` group.
 pub static DEV_DEPENDENCIES: LazyLock<GroupName> =
     LazyLock::new(|| GroupName::from_str("dev").unwrap());
+
+#[cfg(test)]
+mod tests {
+    use super::GroupName;
+
+    #[test]
+    fn from_owned() {
+        let inputs = [
+            "friendly-bard",
+            "friendly.bard",
+            "friendly.BARD",
+            "friendly_bard",
+            "friendly--bard",
+            "friendly-.bard",
+            "FrIeNdLy-._.-bArD",
+        ];
+        for input in inputs {
+            assert_eq!(
+                GroupName::from_owned(input.to_string()).unwrap().as_ref(),
+                "friendly-bard"
+            );
+        }
+    }
+
+    #[test]
+    fn from_owned_failures() {
+        let failures = [
+            "",
+            " starts-with-space",
+            "-starts-with-dash",
+            "ends-with-dash-",
+            "ends-with-space ",
+            "includes!invalid-char",
+            "space in middle",
+            "alpha-α",
+        ];
+        for input in failures {
+            assert!(GroupName::from_owned(input.to_string()).is_err());
+        }
+    }
+}

@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::mem::MaybeUninit;
 
 pub use dist_info_name::DistInfoName;
 pub use extra_name::{DefaultExtras, ExtraName};
@@ -19,133 +18,175 @@ pub(crate) fn validate_and_normalize_ref(
     name: impl AsRef<str>,
 ) -> Result<SmallString, InvalidNameError> {
     let name = name.as_ref();
-    if is_normalized(name)? {
-        Ok(SmallString::from(name))
-    } else {
-        normalize(name)
+    match validate_normalization(name)? {
+        Normalization::AlreadyNormalized => Ok(SmallString::from(name)),
+        Normalization::Required { len } => normalize(name, len),
     }
 }
 
-/// Normalize an unowned package or extra name.
-#[expect(
-    unsafe_code,
-    reason = "directly initialize ArcStr with validated ASCII"
-)]
-fn normalize(name: &str) -> Result<SmallString, InvalidNameError> {
-    let len = normalized_len(name)?;
-    // SAFETY: `normalized_len` validates that `name` contains only ASCII alphanumerics and
-    // supported separators, and returns the exact length written by `write_normalized`. The writer
-    // initializes every byte in the output buffer with valid UTF-8.
-    let normalized = unsafe {
-        arcstr::ArcStr::init_with_unchecked(len, |bytes| {
-            write_normalized(name, bytes);
-        })
+/// Validate and normalize an owned package or extra name.
+pub(crate) fn validate_and_normalize_owned(name: String) -> Result<SmallString, InvalidNameError> {
+    let Normalization::Required { len } = validate_normalization(&name)? else {
+        return Ok(SmallString::from(name));
     };
+    let mut bytes = name.into_bytes();
+    let mut index = 0;
+    let mut previous_separator = true;
+    for read in 0..bytes.len() {
+        let byte = bytes[read];
+        match byte {
+            b'A'..=b'Z' => {
+                bytes[index] = byte.to_ascii_lowercase();
+                index += 1;
+                previous_separator = false;
+            }
+            b'a'..=b'z' | b'0'..=b'9' => {
+                bytes[index] = byte;
+                index += 1;
+                previous_separator = false;
+            }
+            b'-' | b'_' | b'.' if !previous_separator => {
+                bytes[index] = b'-';
+                index += 1;
+                previous_separator = true;
+            }
+            b'-' | b'_' | b'.' => {}
+            _ => {}
+        }
+    }
+    bytes.truncate(index);
+    debug_assert_eq!(index, len);
+
+    let normalized = String::from_utf8(bytes)
+        .map_err(|err| InvalidNameError(String::from_utf8_lossy(err.as_bytes()).into_owned()))?;
+    Ok(SmallString::from(normalized))
+}
+
+/// Normalize an unowned package or extra name.
+fn normalize(name: &str, len: usize) -> Result<SmallString, InvalidNameError> {
+    let normalized = arcstr::ArcStr::init_with(len, |bytes| {
+        write_normalized(name, bytes);
+    })
+    .map_err(|_| InvalidNameError(name.to_string()))?;
 
     Ok(SmallString::from(normalized))
 }
 
-fn normalized_len(name: &str) -> Result<usize, InvalidNameError> {
+enum Normalization {
+    AlreadyNormalized,
+    Required { len: usize },
+}
+
+fn validate_normalization(name: &str) -> Result<Normalization, InvalidNameError> {
     // An empty string is not a valid package, extra, or group name.
     if name.is_empty() {
         return Err(InvalidNameError(name.to_string()));
     }
 
-    let mut len = 0;
-    let mut last = None;
-    for byte in name.bytes() {
+    let mut previous_separator = true;
+    for (index, byte) in name.bytes().enumerate() {
         match byte {
-            b'A'..=b'Z' => len += 1,
-            b'a'..=b'z' | b'0'..=b'9' => {
-                len += 1;
+            b'A'..=b'Z' => {
+                return required_normalized_len(name, index, index, previous_separator);
             }
-            b'-' | b'_' | b'.' => {
-                match last {
+            b'a'..=b'z' | b'0'..=b'9' => {
+                previous_separator = false;
+            }
+            b'_' | b'.' => {
+                if previous_separator {
                     // Names can't start with punctuation.
-                    None => return Err(InvalidNameError(name.to_string())),
-                    Some(b'-' | b'_' | b'.') => {}
-                    Some(_) => len += 1,
+                    if index == 0 {
+                        return Err(InvalidNameError(name.to_string()));
+                    }
                 }
+                return required_normalized_len(name, index, index, previous_separator);
+            }
+            b'-' => {
+                if previous_separator {
+                    // Names can't start with punctuation.
+                    if index == 0 {
+                        return Err(InvalidNameError(name.to_string()));
+                    }
+                    return required_normalized_len(name, index, index, previous_separator);
+                }
+                previous_separator = true;
             }
             _ => return Err(InvalidNameError(name.to_string())),
         }
-        last = Some(byte);
     }
 
     // Names can't end with punctuation.
-    if matches!(last, Some(b'-' | b'_' | b'.')) {
+    if previous_separator {
         return Err(InvalidNameError(name.to_string()));
     }
 
-    Ok(len)
+    Ok(Normalization::AlreadyNormalized)
 }
 
-fn write_normalized(name: &str, normalized: &mut [MaybeUninit<u8>]) {
+fn required_normalized_len(
+    name: &str,
+    start: usize,
+    mut len: usize,
+    mut previous_separator: bool,
+) -> Result<Normalization, InvalidNameError> {
+    for byte in name[start..].bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => {
+                len += 1;
+                previous_separator = false;
+            }
+            b'-' | b'_' | b'.' => {
+                if !previous_separator {
+                    len += 1;
+                }
+                previous_separator = true;
+            }
+            _ => return Err(InvalidNameError(name.to_string())),
+        }
+    }
+
+    // Names can't end with punctuation.
+    if previous_separator {
+        return Err(InvalidNameError(name.to_string()));
+    }
+
+    Ok(Normalization::Required { len })
+}
+
+fn write_normalized(name: &str, normalized: &mut [u8]) {
     let mut index = 0;
-    let mut last = None;
+    let mut previous_separator = true;
     for byte in name.bytes() {
         match byte {
             b'A'..=b'Z' => {
-                normalized[index].write(byte.to_ascii_lowercase());
+                normalized[index] = byte.to_ascii_lowercase();
                 index += 1;
+                previous_separator = false;
             }
             b'a'..=b'z' | b'0'..=b'9' => {
-                normalized[index].write(byte);
+                normalized[index] = byte;
                 index += 1;
+                previous_separator = false;
             }
-            b'-' | b'_' | b'.' if !matches!(last, None | Some(b'-' | b'_' | b'.')) => {
-                normalized[index].write(b'-');
+            b'-' | b'_' | b'.' if !previous_separator => {
+                normalized[index] = b'-';
                 index += 1;
+                previous_separator = true;
             }
             b'-' | b'_' | b'.' => {}
             _ => {}
         }
-        last = Some(byte);
     }
     debug_assert_eq!(index, normalized.len());
 }
 
 /// Returns `true` if the name is already normalized.
+#[cfg(test)]
 fn is_normalized(name: impl AsRef<str>) -> Result<bool, InvalidNameError> {
-    // An empty string is not a valid package, extra, or group name.
-    if name.as_ref().is_empty() {
-        return Err(InvalidNameError(name.as_ref().to_string()));
-    }
-
-    let mut last = None;
-    for char in name.as_ref().bytes() {
-        match char {
-            b'A'..=b'Z' => {
-                // Uppercase characters need to be converted to lowercase.
-                return Ok(false);
-            }
-            b'a'..=b'z' | b'0'..=b'9' => {}
-            b'_' | b'.' => {
-                // `_` and `.` are normalized to `-`.
-                return Ok(false);
-            }
-            b'-' => {
-                match last {
-                    // Names can't start with punctuation.
-                    None => return Err(InvalidNameError(name.as_ref().to_string())),
-                    Some(b'-') => {
-                        // Runs of `-` are normalized to a single `-`.
-                        return Ok(false);
-                    }
-                    Some(_) => {}
-                }
-            }
-            _ => return Err(InvalidNameError(name.as_ref().to_string())),
-        }
-        last = Some(char);
-    }
-
-    // Names can't end with punctuation.
-    if matches!(last, Some(b'-' | b'_' | b'.')) {
-        return Err(InvalidNameError(name.as_ref().to_string()));
-    }
-
-    Ok(true)
+    Ok(matches!(
+        validate_normalization(name.as_ref())?,
+        Normalization::AlreadyNormalized
+    ))
 }
 
 /// Invalid [`PackageName`] or [`ExtraName`].
@@ -277,6 +318,10 @@ mod tests {
                 PackageName::from_owned(input.to_string()).unwrap().as_ref(),
                 "friendly-bard"
             );
+            assert_eq!(
+                ExtraName::from_owned(input.to_string()).unwrap().as_ref(),
+                "friendly-bard"
+            );
         }
     }
 
@@ -296,6 +341,7 @@ mod tests {
             assert!(validate_and_normalize_ref(input).is_err());
             assert!(is_normalized(input).is_err());
             assert!(PackageName::from_owned(input.to_string()).is_err());
+            assert!(ExtraName::from_owned(input.to_string()).is_err());
         }
     }
 }
