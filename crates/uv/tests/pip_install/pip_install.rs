@@ -6,6 +6,8 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow};
 use assert_cmd::prelude::*;
 use assert_fs::prelude::*;
+#[cfg(unix)]
+use async_compression::tokio::write::ZstdEncoder;
 use async_zip::base::write::ZipFileWriter;
 use async_zip::{Compression, ZipEntryBuilder};
 use flate2::write::GzEncoder;
@@ -16,6 +18,8 @@ use futures::io::AllowStdIo;
 use indoc::{formatdoc, indoc};
 use insta::assert_snapshot;
 use predicates::prelude::predicate;
+#[cfg(unix)]
+use tokio::io::AsyncWriteExt;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 use url::Url;
 use walkdir::WalkDir;
@@ -1755,6 +1759,21 @@ fn allow_incompatibilities() -> Result<()> {
     // This no longer works, since we have an incompatible version of Jinja2.
     context.assert_command("import flask").failure();
 
+    // Repeating the satisfied installation must still surface diagnostics in strict mode.
+    uv_snapshot!(context.pip_install()
+        .arg("-r")
+        .arg("requirements.txt")
+        .arg("--strict"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Checked 1 package in [TIME]
+    warning: The package `flask` requires `jinja2>=3.1.2`, but `2.11.3` is installed
+    "
+    );
+
     Ok(())
 }
 
@@ -3275,12 +3294,7 @@ fn install_git_private_https_pat_not_authorized() {
     // A revoked token
     let token = "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";
 
-    // TODO(john): We need this filter because we are displaying the token when
-    // an underlying process error message is being displayed. We should actually
-    // mask it.
-    let context = context
-        .with_filter((token, "***"))
-        .with_filter(("`.*/git fetch (.*)`", "`git fetch $1`"));
+    let context = context.with_filter(("`.*/git fetch (.*)`", "`git fetch $1`"));
 
     // We provide a username otherwise (since the token is invalid), the git cli will prompt for a password
     // and hang the test
@@ -3295,7 +3309,7 @@ fn install_git_private_https_pat_not_authorized() {
       × Failed to download and build `uv-private-pypackage @ git+https://git:****@github.com/astral-test/uv-private-pypackage`
       ├─▶ Git operation failed
       ├─▶ failed to clone into: [CACHE_DIR]/git-v0/db/8401f5508e3e612d
-      ╰─▶ process didn't exit successfully: `git fetch --force --update-head-ok 'https://git:***@github.com/astral-test/uv-private-pypackage' '+HEAD:refs/remotes/origin/HEAD'` (exit status: 128)
+      ╰─▶ process didn't exit successfully: `git fetch --force --update-head-ok 'https://git:****@github.com/astral-test/uv-private-pypackage' '+HEAD:refs/remotes/origin/HEAD'` (exit status: 128)
           --- stderr
           remote: Invalid username or token. Password authentication is not supported for Git operations.
           fatal: Authentication failed for 'https://github.com/astral-test/uv-private-pypackage/'
@@ -13068,6 +13082,70 @@ fn pep_751_install_registry_sdist() -> Result<()> {
 }
 
 #[test]
+fn pep_751_install_invalid_artifact_urls() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let pylock_toml = context.temp_dir.child("pylock.toml");
+    pylock_toml.write_str(
+        r#"
+        lock-version = "1.0"
+        created-by = "uv"
+        requires-python = ">=3.12"
+
+        [[packages]]
+        name = "foo"
+        version = "1.0.0"
+        wheels = [{ name = "foo-1.0.0-py3-none-any.whl", url = "data:application/octet-stream,ignored", hashes = { sha256 = "0000000000000000000000000000000000000000000000000000000000000000" } }]
+        "#,
+    )?;
+
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg("--preview")
+        .arg("--offline")
+        .arg("--dry-run")
+        .arg("-r")
+        .arg("pylock.toml"), @"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Invalid artifact URL: `data:application/octet-stream,ignored`
+    "
+    );
+
+    pylock_toml.write_str(
+        r#"
+        lock-version = "1.0"
+        created-by = "uv"
+        requires-python = ">=3.12"
+
+        [[packages]]
+        name = "foo"
+        version = "1.0.0"
+        sdist = { name = "foo-1.0.0.tar.gz", url = "data:application/octet-stream,ignored", hashes = { sha256 = "0000000000000000000000000000000000000000000000000000000000000000" } }
+        "#,
+    )?;
+
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg("--preview")
+        .arg("--offline")
+        .arg("--dry-run")
+        .arg("-r")
+        .arg("pylock.toml"), @"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Invalid artifact URL: `data:application/octet-stream,ignored`
+    "
+    );
+
+    Ok(())
+}
+
+#[test]
 fn pep_751_install_directory() -> Result<()> {
     let context = uv_test::test_context!("3.12");
 
@@ -13452,6 +13530,57 @@ fn pep_751_install_path_wheel() -> Result<()> {
     Checked 1 package in [TIME]
     "
     );
+
+    Ok(())
+}
+
+#[test]
+fn pep_751_prefers_path_over_url() -> Result<()> {
+    let context = uv_test::test_context!("3.13");
+
+    for wheel in [
+        "ok-1.0.0-py3-none-any.whl",
+        "basic_package-0.1.0-py3-none-any.whl",
+    ] {
+        fs::copy(
+            context.workspace_root.join("test/links").join(wheel),
+            context.temp_dir.child(wheel),
+        )?;
+    }
+
+    context.temp_dir.child("pylock.toml").write_str(
+        r#"
+        lock-version = "1.0"
+        created-by = "uv"
+
+        [[packages]]
+        name = "ok"
+        version = "1.0.0"
+        archive = { path = "ok-1.0.0-py3-none-any.whl", url = "https://example.invalid/ok-1.0.0.tar.gz", hashes = { sha256 = "79f0b33e6ce1e09eaa1784c8eee275dfe84d215d9c65c652f07c18e85fdaac5f" } }
+
+        [[packages]]
+        name = "basic-package"
+        version = "0.1.0"
+        wheels = [{ path = "basic_package-0.1.0-py3-none-any.whl", url = "https://example.invalid/basic_package-0.1.0-py3-none-any.whl", hashes = { sha256 = "7b6229db79b5800e4e98a351b5628c1c8a944533a2d428aeeaa7275a30d4ea82" } }]
+        "#,
+    )?;
+
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg("--preview")
+        .arg("--offline")
+        .arg("--no-build")
+        .arg("-r")
+        .arg("pylock.toml"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Prepared 2 packages in [TIME]
+    Installed 2 packages in [TIME]
+     + basic-package==0.1.0
+     + ok==1.0.0 (from file://[TEMP_DIR]/ok-1.0.0-py3-none-any.whl)
+    ");
 
     Ok(())
 }
@@ -16934,6 +17063,113 @@ fn handle_record_mismatches() -> Result<()> {
     foo/__init__.py,,49
     foo/py.typed,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
     ");
+
+    Ok(())
+}
+
+/// A skipped traversal entry in a zstd-compressed tar wheel must not survive RECORD healing and
+/// remove an unrelated environment executable during uninstall.
+#[cfg(unix)]
+#[tokio::test]
+async fn tar_wheel_traversal_is_not_recorded() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let victim = venv_bin_path(&context.venv).join("victim");
+    fs_err::write(&victim, "I should not be deleted")?;
+
+    let record = indoc! {"
+        tar_wheel/__init__.py,,
+        tar_wheel-1.0.0.dist-info/METADATA,,
+        tar_wheel-1.0.0.dist-info/WHEEL,,
+        tar_wheel-1.0.0.dist-info/RECORD,,
+        ../../../bin/victim,,
+    "};
+    let entries = [
+        ("tar_wheel/__init__.py", ""),
+        (
+            "tar_wheel-1.0.0.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: tar-wheel\nVersion: 1.0.0\n",
+        ),
+        (
+            "tar_wheel-1.0.0.dist-info/WHEEL",
+            "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        ),
+        ("tar_wheel-1.0.0.dist-info/RECORD", record),
+        ("../../../bin/victim", "malicious replacement"),
+    ];
+
+    let mut tar = tokio_tar::Builder::new_non_terminated(ZstdEncoder::new(Vec::new()));
+    for (path, contents) in entries {
+        let mut header = tokio_tar::Header::new_gnu();
+        header.as_mut_bytes()[..path.len()].copy_from_slice(path.as_bytes());
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, contents.as_bytes()).await?;
+    }
+    let mut encoder = tar.into_inner().await?;
+    encoder.shutdown().await?;
+    let tar_wheel = encoder.into_inner();
+
+    let server = MockServer::start().await;
+    let wheel_url = format!("{}/files/tar_wheel-1.0.0-py3-none-any.whl", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/tar-wheel/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            formatdoc! {r#"
+                {{
+                    "name": "tar-wheel",
+                    "files": [{{
+                        "filename": "tar_wheel-1.0.0-py3-none-any.whl",
+                        "url": "{wheel_url}",
+                        "hashes": {{}},
+                        "core-metadata": true,
+                        "upload-time": "2024-03-24T00:00:00Z",
+                        "zstd": {{
+                            "hashes": {{}},
+                            "size": {}
+                        }}
+                    }}]
+                }}
+            "#, tar_wheel.len()},
+            "application/vnd.pyx.simple.v1+json",
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/files/tar_wheel-1.0.0-py3-none-any.whl.metadata"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(indoc! {"
+            Metadata-Version: 2.1
+            Name: tar-wheel
+            Version: 1.0.0
+        "}))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/files/tar_wheel-1.0.0-py3-none-any.whl.tar.zst"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(tar_wheel))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    context
+        .pip_install()
+        .arg("tar-wheel==1.0.0")
+        .arg("--default-index")
+        .arg(server.uri())
+        .assert()
+        .success();
+
+    let installed_record = fs_err::read_to_string(
+        context
+            .site_packages()
+            .join("tar_wheel-1.0.0.dist-info/RECORD"),
+    )?;
+    assert!(!installed_record.contains("../../../bin/victim"));
+
+    context.pip_uninstall().arg("tar-wheel").assert().success();
+    assert_eq!(fs_err::read_to_string(&victim)?, "I should not be deleted");
 
     Ok(())
 }

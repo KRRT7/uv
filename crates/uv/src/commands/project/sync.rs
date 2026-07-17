@@ -27,7 +27,9 @@ use uv_normalize::{DefaultExtras, DefaultGroups, PackageName};
 use uv_pep508::{MarkerTree, VersionOrUrl};
 use uv_preview::{Preview, PreviewFeature};
 use uv_pypi_types::{ParsedArchiveUrl, ParsedGitDirectoryUrl, ParsedGitPathUrl, ParsedUrl};
-use uv_python::{PythonDownloads, PythonEnvironment, PythonPreference, PythonRequest};
+use uv_python::{
+    ConfigDiscovery, PythonDownloads, PythonEnvironment, PythonPreference, PythonRequest,
+};
 use uv_redacted::DisplaySafeUrl;
 use uv_resolver::{FlatIndex, ForkStrategy, Installable, Lock, PrereleaseMode, ResolutionMode};
 use uv_scripts::Pep723Script;
@@ -81,7 +83,7 @@ pub(crate) async fn sync(
     script: Option<Pep723Script>,
     installer_metadata: bool,
     concurrency: Concurrency,
-    no_config: bool,
+    config_discovery: ConfigDiscovery,
     cache: &Cache,
     workspace_cache: &WorkspaceCache,
     printer: Printer,
@@ -166,7 +168,7 @@ pub(crate) async fn sync(
                 python_preference,
                 python_downloads,
                 false,
-                no_config,
+                config_discovery,
                 active,
                 cache,
                 dry_run,
@@ -184,7 +186,7 @@ pub(crate) async fn sync(
                 python_downloads,
                 &install_mirrors,
                 false,
-                no_config,
+                config_discovery,
                 active,
                 cache,
                 dry_run,
@@ -774,8 +776,54 @@ pub(crate) async fn do_sync(
     // Constrain any build requirements marked as `match-runtime = true`.
     let extra_build_requires = extra_build_requires.match_runtime(&resolution)?;
 
+    // Extract the hashes from the lockfile.
+    let hasher = HashStrategy::from_resolution(&resolution, HashCheckingMode::Verify)?;
+
     // Populate credentials from the target.
     store_credentials_from_target(target, &client_builder)?;
+
+    let bytecode_compilation = compile_bytecode.then_some(operations::BytecodeCompilation::All);
+    let site_packages = SitePackages::from_environment(venv)?;
+    let installation_plan = operations::InstallationPlan::build(
+        &resolution,
+        site_packages,
+        InstallationStrategy::Strict,
+        reinstall,
+        build_options,
+        &hasher,
+        index_locations,
+        config_setting,
+        config_settings_package,
+        &extra_build_requires,
+        extra_build_variables,
+        cache,
+        venv,
+        &tags,
+    )?;
+
+    // Avoid constructing an HTTP client and build dispatch when planning shows that there is no
+    // installation work to perform.
+    if installation_plan.is_noop(modifications, bytecode_compilation, dry_run) {
+        maybe_check_malware(
+            &target,
+            &resolution,
+            &malware_check_client_builder,
+            concurrency,
+            cache,
+            preview,
+            malware_settings,
+        )
+        .await?;
+
+        return Ok(installation_plan.finish_noop(
+            &resolution,
+            modifications,
+            bytecode_compilation,
+            logger.as_ref(),
+            dry_run,
+            printer,
+        )?);
+    }
 
     // Initialize the registry client.
     let client = RegistryClientBuilder::new(client_builder, cache.clone())
@@ -800,9 +848,6 @@ pub(crate) async fn do_sync(
     // TODO(charlie): These are all default values. We should consider whether we want to make them
     // optional on the downstream APIs.
     let build_hasher = HashStrategy::default();
-
-    // Extract the hashes from the lockfile.
-    let hasher = HashStrategy::from_resolution(&resolution, HashCheckingMode::Verify)?;
 
     // Resolve the flat indexes from `--find-links`.
     let flat_index = {
@@ -841,53 +886,73 @@ pub(crate) async fn do_sync(
     );
 
     // Run a malware check against OSV before installing.
-    if malware_settings.enabled {
-        if !preview.is_enabled(PreviewFeature::MalwareCheck) {
-            warn_user!(
-                "Malware checks are experimental and may change without warning. Pass `--preview-features {}` to disable this warning.",
-                PreviewFeature::MalwareCheck
-            );
-        }
-        check_malware(
-            &target,
-            &resolution,
-            &malware_check_client_builder,
-            concurrency,
-            malware_settings.malware_check_url.clone(),
-            cache,
-        )
-        .await?;
-    }
-
-    let site_packages = SitePackages::from_environment(venv)?;
-
-    // Sync the environment.
-    let changelog = operations::install(
+    maybe_check_malware(
+        &target,
         &resolution,
-        site_packages,
-        InstallationStrategy::Strict,
-        modifications,
-        reinstall,
-        build_options,
-        link_mode,
-        compile_bytecode.then_some(operations::BytecodeCompilation::All),
-        &hasher,
-        &tags,
-        &client,
-        state.in_flight(),
+        &malware_check_client_builder,
         concurrency,
-        &build_dispatch,
         cache,
-        venv,
-        logger,
-        installer_metadata,
-        dry_run,
-        printer,
         preview,
+        malware_settings,
     )
     .await?;
 
+    // Sync the environment.
+    let changelog = installation_plan
+        .execute(
+            &resolution,
+            modifications,
+            build_options,
+            link_mode,
+            bytecode_compilation,
+            &hasher,
+            &tags,
+            &client,
+            state.in_flight(),
+            concurrency,
+            &build_dispatch,
+            cache,
+            venv,
+            logger,
+            installer_metadata,
+            dry_run,
+            printer,
+            preview,
+        )
+        .await?;
+
     Ok(changelog)
+}
+
+/// Run a malware check against OSV if malware checking is enabled.
+async fn maybe_check_malware(
+    target: &InstallTarget<'_>,
+    resolution: &Resolution,
+    client_builder: &BaseClientBuilder<'_>,
+    concurrency: &Concurrency,
+    cache: &Cache,
+    preview: Preview,
+    malware_settings: &MalwareCheckSettings,
+) -> Result<(), ProjectError> {
+    if !malware_settings.enabled {
+        return Ok(());
+    }
+
+    if !preview.is_enabled(PreviewFeature::MalwareCheck) {
+        warn_user!(
+            "Malware checks are experimental and may change without warning. Pass `--preview-features {}` to disable this warning.",
+            PreviewFeature::MalwareCheck
+        );
+    }
+    check_malware(
+        target,
+        resolution,
+        client_builder,
+        concurrency,
+        malware_settings.malware_check_url.clone(),
+        cache,
+    )
+    .await
 }
 
 /// Run a malware check against OSV before installing dependencies.
@@ -909,9 +974,8 @@ async fn check_malware(
         .collect();
 
     let all_extras = ExtrasSpecification::from_all_extras().with_defaults(DefaultExtras::All);
-    let all_groups =
-        DependencyGroups::from_args(false, false, false, vec![], vec![], false, vec![], true)
-            .with_defaults(DefaultGroups::All);
+    let all_groups = DependencyGroups::from_args(None, vec![], vec![], false, vec![], true)
+        .with_defaults(DefaultGroups::All);
 
     // NOTE: For now, we only check locked packages that indicate a source from
     // PyPI. The rationale behind this is that private (i.e. non-PyPI) packages

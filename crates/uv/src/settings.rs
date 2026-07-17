@@ -1,4 +1,5 @@
 use std::env::VarError;
+use std::fmt;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process;
@@ -19,7 +20,7 @@ use uv_cli::{
     PipSyncArgs, PipTreeArgs, PipUninstallArgs, PythonFindArgs, PythonInstallArgs, PythonListArgs,
     PythonListFormat, PythonPinArgs, PythonUninstallArgs, PythonUpgradeArgs, RemoveArgs, RunArgs,
     SyncArgs, SyncFormat, ToolDirArgs, ToolInstallArgs, ToolListArgs, ToolRunArgs,
-    ToolUninstallArgs, TreeArgs, UpgradeArgs, VenvArgs, VersionArgs, VersionBumpSpec,
+    ToolUninstallArgs, TreeArgs, TreeFormat, UpgradeArgs, VenvArgs, VersionArgs, VersionBumpSpec,
     VersionFormat,
 };
 use uv_cli::{
@@ -33,8 +34,8 @@ use uv_cli::{
 };
 use uv_client::Connectivity;
 use uv_configuration::{
-    BuildIsolation, BuildOptions, Concurrency, DependencyGroups, DryRun, EditableMode, EnvFile,
-    ExcludeDependency, ExportFormat, ExtrasSpecification, GitLfsSetting, HashCheckingMode,
+    BuildIsolation, BuildOptions, Concurrency, DependencyGroups, DevMode, DryRun, EditableMode,
+    EnvFile, ExcludeDependency, ExportFormat, ExtrasSpecification, GitLfsSetting, HashCheckingMode,
     IndexStrategy, InstallOptions, KeyringProviderType, NoBinary, NoBuild, NoSources, Override,
     PackageOverride, PipCompileFormat, ProjectBuildBackend, ProxyUrl, Reinstall, RequiredVersion,
     TargetTriple, TrustedHost, TrustedPublishing, Upgrade, VersionControlSystem,
@@ -127,6 +128,11 @@ impl GlobalSettings {
                     .combine(workspace.and_then(|workspace| workspace.globals.concurrent_installs))
                     .map(NonZeroUsize::get)
                     .unwrap_or_else(Concurrency::threads),
+                environment
+                    .concurrency
+                    .cache_reads
+                    .map(NonZeroUsize::get)
+                    .unwrap_or(Concurrency::DEFAULT_CACHE_READS),
             ),
             show_settings: args.show_settings,
             preview: resolve_preview(args, workspace, environment),
@@ -803,9 +809,7 @@ impl RunSettings {
                 flag(all_extras, no_all_extras, "all-extras").unwrap_or_default(),
             ),
             groups: DependencyGroups::from_args(
-                dev.into(),
-                no_dev.into(),
-                only_dev,
+                DevMode::from_args(dev.into(), no_dev.into(), only_dev),
                 group,
                 if no_group.is_empty() {
                     environment.no_group.clone().unwrap_or_default()
@@ -1941,9 +1945,7 @@ impl SyncSettings {
                 flag(all_extras, no_all_extras, "all-extras").unwrap_or_default(),
             ),
             groups: DependencyGroups::from_args(
-                dev.into(),
-                no_dev.into(),
-                only_dev,
+                DevMode::from_args(dev.into(), no_dev.into(), only_dev),
                 group,
                 if no_group.is_empty() {
                     environment.no_group.clone().unwrap_or_default()
@@ -2649,6 +2651,7 @@ pub(crate) struct TreeSettings {
     pub(super) lock_check: LockCheck,
     pub(super) frozen: Option<FrozenSource>,
     pub(super) universal: bool,
+    pub(super) format: TreeFormat,
     pub(super) depth: u8,
     pub(super) prune: Vec<PackageName>,
     pub(super) package: Vec<PackageName>,
@@ -2675,6 +2678,7 @@ impl TreeSettings {
         let TreeArgs {
             tree,
             universal,
+            format,
             dev,
             only_dev,
             no_dev,
@@ -2716,9 +2720,7 @@ impl TreeSettings {
 
         Self {
             groups: DependencyGroups::from_args(
-                dev.into(),
-                no_dev.into(),
-                only_dev,
+                DevMode::from_args(dev.into(), no_dev.into(), only_dev),
                 group,
                 if no_group.is_empty() {
                     environment.no_group.clone().unwrap_or_default()
@@ -2732,6 +2734,7 @@ impl TreeSettings {
             lock_check: resolve_lock_check(locked),
             frozen: resolve_frozen(frozen),
             universal,
+            format,
             depth: tree.depth,
             prune: tree.prune,
             package: tree.package,
@@ -2880,9 +2883,7 @@ impl ExportSettings {
                 flag(all_extras, no_all_extras, "all-extras").unwrap_or_default(),
             ),
             groups: DependencyGroups::from_args(
-                dev.into(),
-                no_dev.into(),
-                only_dev,
+                DevMode::from_args(dev.into(), no_dev.into(), only_dev),
                 group,
                 if no_group.is_empty() {
                     environment.no_group.clone().unwrap_or_default()
@@ -3070,9 +3071,7 @@ impl CheckSettings {
                 flag(all_extras, no_all_extras, "all-extras").unwrap_or_default(),
             ),
             groups: DependencyGroups::from_args(
-                dev.into(),
-                no_dev.into(),
-                only_dev,
+                DevMode::from_args(dev.into(), no_dev.into(), only_dev),
                 group,
                 if no_group.is_empty() {
                     environment.no_group.clone().unwrap_or_default()
@@ -3114,7 +3113,7 @@ pub(crate) struct AuditSettings {
     pub(crate) settings: ResolverSettings,
     pub(crate) output_format: AuditOutputFormat,
     pub(crate) service_format: VulnerabilityServiceFormat,
-    pub(crate) service_url: Option<String>,
+    pub(crate) service_url: Option<DisplaySafeUrl>,
     pub(crate) ignore: Vec<VulnerabilityID>,
     pub(crate) ignore_until_fixed: Vec<VulnerabilityID>,
 }
@@ -3177,9 +3176,7 @@ impl AuditSettings {
                 true,
             ),
             groups: DependencyGroups::from_args(
-                only_group.is_empty() && !only_dev,
-                no_dev,
-                only_dev,
+                DevMode::from_args(only_group.is_empty() && !only_dev, no_dev, only_dev),
                 vec![],
                 if no_group.is_empty() {
                     environment.no_group.clone().unwrap_or_default()
@@ -4981,7 +4978,7 @@ impl<'a> From<&'a ResolverInstallerSettings> for InstallerSettingsRef<'a> {
 }
 
 /// The resolved settings to use for an invocation of the `uv publish` CLI.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct PublishSettings {
     // CLI only, see [`PublishArgs`] for docs.
     pub(crate) files: Vec<String>,
@@ -5000,6 +4997,25 @@ pub(crate) struct PublishSettings {
 
     // Configuration only
     pub(crate) index_locations: IndexLocations,
+}
+
+impl fmt::Debug for PublishSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublishSettings")
+            .field("files", &self.files)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "****"))
+            .field("index", &self.index)
+            .field("dry_run", &self.dry_run)
+            .field("no_attestations", &self.no_attestations)
+            .field("direct", &self.direct)
+            .field("publish_url", &self.publish_url)
+            .field("trusted_publishing", &self.trusted_publishing)
+            .field("keyring_provider", &self.keyring_provider)
+            .field("check_url", &self.check_url)
+            .field("index_locations", &self.index_locations)
+            .finish()
+    }
 }
 
 impl PublishSettings {

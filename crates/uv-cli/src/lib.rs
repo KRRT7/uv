@@ -79,6 +79,15 @@ pub enum AuditOutputFormat {
     Sarif,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum TreeFormat {
+    /// Display the dependency graph as a human-readable tree.
+    #[default]
+    Text,
+    /// Display the dependency graph as JSON.
+    Json,
+}
+
 #[derive(Debug, Default, Clone, clap::ValueEnum)]
 pub enum ListFormat {
     /// Display the list of packages in a human-readable table.
@@ -4642,7 +4651,13 @@ pub struct RemoveArgs {
     /// Remove the packages from the development dependency group [env: UV_DEV=]
     ///
     /// This option is an alias for `--group dev`.
-    #[arg(long, conflicts_with("optional"), conflicts_with("group"), value_parser = clap::builder::BoolishValueParser::new())]
+    #[arg(
+        long,
+        conflicts_with("optional"),
+        conflicts_with("group"),
+        conflicts_with("script"),
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub dev: bool,
 
     /// Remove the packages from the project's optional dependencies for the specified extra.
@@ -4740,6 +4755,10 @@ pub struct TreeArgs {
     /// Multiple versions may be shown for a each package.
     #[arg(long)]
     pub universal: bool,
+
+    /// The format in which to display the dependency graph.
+    #[arg(long, value_enum, default_value_t = TreeFormat::default())]
+    pub format: TreeFormat,
 
     #[command(flatten)]
     pub tree: DisplayTreeArgs,
@@ -5573,7 +5592,7 @@ pub struct AuditArgs {
     /// The service needs to use the OSV protocol, unless a different
     /// format was requested by `--service-format`.
     #[arg(long, value_hint = ValueHint::Url)]
-    pub service_url: Option<String>,
+    pub service_url: Option<DisplaySafeUrl>,
 }
 
 #[derive(Args)]

@@ -5,7 +5,7 @@ use flate2::bufread::GzDecoder;
 use fs_err::File;
 use futures::io::AllowStdIo;
 use indoc::{formatdoc, indoc};
-use insta::{assert_json_snapshot, assert_snapshot};
+use insta::{allow_duplicates, assert_json_snapshot, assert_snapshot};
 use std::io::BufReader;
 use std::path::Path;
 use std::process::Command;
@@ -13,6 +13,28 @@ use tempfile::TempDir;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use uv_static::EnvVars;
 use uv_test::{uv_snapshot, venv_bin_path};
+
+#[test]
+fn get_requires_for_build_returns_error() {
+    let context = uv_test::test_context!("3.12");
+
+    allow_duplicates! {
+        for command in [
+            "get-requires-for-build-sdist",
+            "get-requires-for-build-wheel",
+            "get-requires-for-build-editable",
+        ] {
+            uv_snapshot!(context.build_backend().arg(command), @"
+            success: false
+            exit_code: 2
+            ----- stdout -----
+
+            ----- stderr -----
+            error: uv does not support extra requires
+            ");
+        }
+    }
+}
 
 const BUILT_BY_UV_TEST_SCRIPT: &str = indoc! {r#"
     from built_by_uv import greet
@@ -1084,6 +1106,168 @@ fn error_on_relative_data_dir_outside_project_root() -> Result<()> {
     Building wheel (uv build backend)...
     error: Failed to build `[TEMP_DIR]/project`
       Caused by: The path for the data directory headers must be inside the project: ../header
+    ");
+
+    pyproject_toml.write_str(indoc! {r#"
+        [project]
+        name = "project"
+        version = "0.1.0"
+        requires-python = ">=3.12"
+
+        [tool.uv.build-backend.data]
+        headers = "header/../../outside"
+
+        [build-system]
+        requires = ["uv_build>=0.7,<10000"]
+        build-backend = "uv_build"
+    "#})?;
+    project.child("header").create_dir_all()?;
+    context
+        .temp_dir
+        .child("outside/secret.h")
+        .write_str("not for distribution")?;
+
+    uv_snapshot!(context.filters(), context.build().arg("project").arg("--wheel"), @"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    Building wheel (uv build backend)...
+    error: Failed to build `[TEMP_DIR]/project`
+      Caused by: The path for the data directory headers must be inside the project: ../outside
+    ");
+
+    Ok(())
+}
+
+/// Files excluded from a source distribution or wheel must not leak through a wheel data root.
+#[test]
+fn wheel_data_respects_excludes() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    context
+        .temp_dir
+        .child("pyproject.toml")
+        .write_str(indoc! {r#"
+        [project]
+        name = "project"
+        version = "0.1.0"
+
+        [tool.uv.build-backend]
+        source-exclude = ["*.source-secret"]
+        wheel-exclude = ["*.wheel-secret"]
+
+        [tool.uv.build-backend.data]
+        data = "assets"
+
+        [build-system]
+        requires = ["uv_build>=0.7,<10000"]
+        build-backend = "uv_build"
+    "#})?;
+    context.temp_dir.child("src/project/__init__.py").touch()?;
+    context.temp_dir.child("assets/public.txt").touch()?;
+    context
+        .temp_dir
+        .child("assets/private.source-secret")
+        .touch()?;
+    context
+        .temp_dir
+        .child("assets/private.wheel-secret")
+        .touch()?;
+    context.temp_dir.child("assets/generated.pyc").touch()?;
+
+    uv_snapshot!(context.build().arg("--wheel").arg("--list"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Building project-0.1.0-py3-none-any.whl will include the following files:
+    project/__init__.py (src/project/__init__.py)
+    project-0.1.0.data/data/public.txt (assets/public.txt)
+    project-0.1.0.dist-info/WHEEL (generated)
+    project-0.1.0.dist-info/METADATA (generated)
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
+
+/// A symlinked data root must not package files from outside the project, while an internal
+/// symlink still honors the configured excludes.
+#[test]
+#[cfg(unix)]
+fn wheel_data_symlink_containment() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let project = context.temp_dir.child("project");
+    project.child("src/project/__init__.py").touch()?;
+    context
+        .temp_dir
+        .child("outside/secret.txt")
+        .write_str("not for distribution")?;
+    fs_err::os::unix::fs::symlink(
+        context.temp_dir.child("outside").path(),
+        project.child("external-assets").path(),
+    )?;
+
+    let pyproject_toml = project.child("pyproject.toml");
+    pyproject_toml.write_str(indoc! {r#"
+        [project]
+        name = "project"
+        version = "0.1.0"
+
+        [tool.uv.build-backend.data]
+        data = "external-assets"
+
+        [build-system]
+        requires = ["uv_build>=0.7,<10000"]
+        build-backend = "uv_build"
+    "#})?;
+
+    uv_snapshot!(context.filters(), context.build().arg("project").arg("--wheel").arg("--list"), @"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Failed to build `[TEMP_DIR]/project`
+      Caused by: The path for the data directory data must be inside the project: external-assets
+    ");
+
+    project.child("assets/public.txt").touch()?;
+    project.child("assets/private.secret").touch()?;
+    fs_err::os::unix::fs::symlink(
+        project.child("assets").path(),
+        project.child("internal-assets").path(),
+    )?;
+    pyproject_toml.write_str(indoc! {r#"
+        [project]
+        name = "project"
+        version = "0.1.0"
+
+        [tool.uv.build-backend]
+        wheel-exclude = ["*.secret"]
+
+        [tool.uv.build-backend.data]
+        data = "internal-assets"
+
+        [build-system]
+        requires = ["uv_build>=0.7,<10000"]
+        build-backend = "uv_build"
+    "#})?;
+
+    uv_snapshot!(context.build().arg("project").arg("--wheel").arg("--list"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Building project-0.1.0-py3-none-any.whl will include the following files:
+    project/__init__.py (src/project/__init__.py)
+    project-0.1.0.data/data/public.txt (internal-assets/public.txt)
+    project-0.1.0.dist-info/WHEEL (generated)
+    project-0.1.0.dist-info/METADATA (generated)
+
+    ----- stderr -----
     ");
 
     Ok(())

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use assert_cmd::assert::OutputAssertExt;
 use assert_fs::{fixture::ChildPath, prelude::*};
-use indoc::indoc;
+use indoc::{formatdoc, indoc};
 use insta::assert_snapshot;
 use predicates::{prelude::predicate, str::contains};
 use serde_json::json;
@@ -14,7 +14,7 @@ use uv_static::EnvVars;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use uv_test::{TestContext, uv_snapshot};
+use uv_test::{TestContext, packse::PackseServer, uv_snapshot};
 
 #[test]
 fn run_with_python_version() -> Result<()> {
@@ -843,6 +843,64 @@ fn run_pep723_script_index() -> Result<()> {
     Ok(())
 }
 
+/// Package-scoped source disabling must not discard unrelated script sources or indexes.
+#[test]
+fn run_pep723_script_no_sources_package() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+    let explicit = PackseServer::new("simple/single-package.toml");
+    let default = PackseServer::new("extras/missing-extra.toml");
+
+    let test_script = context.temp_dir.child("main.py");
+    test_script.write_str(&formatdoc! { r#"
+        # /// script
+        # requires-python = ">=3.11"
+        # dependencies = [
+        #   "a",
+        # ]
+        #
+        # [[tool.uv.index]]
+        # name = "test"
+        # url = "{index}"
+        # explicit = true
+        #
+        # [tool.uv.sources]
+        # a = {{ index = "test" }}
+        # ///
+
+        import a
+       "#,
+        index = explicit.index_url(),
+    })?;
+
+    uv_snapshot!(context.filters(), context.run().arg("--default-index").arg(default.index_url()).arg("--no-sources-package").arg("unrelated").arg("main.py"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Prepared 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + a==2.0.0
+    ");
+
+    fs_err::remove_dir_all(&context.cache_dir)?;
+
+    uv_snapshot!(context.filters(), context.run().arg("--default-index").arg(default.index_url()).arg("--no-sources-package").arg("a").arg("main.py"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Prepared 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + a==1.0.0
+    ");
+
+    Ok(())
+}
+
 /// Run a PEP 723-compatible script with `tool.uv` constraints.
 #[test]
 fn run_pep723_script_constraints() -> Result<()> {
@@ -1603,7 +1661,22 @@ fn run_with_local_wheel_refreshes_rebuilt_wheel() -> Result<()> {
 /// search paths are available in these ephemeral environments.
 #[test]
 fn run_with_pyvenv_cfg_file() -> Result<()> {
-    let context = uv_test::test_context!("3.12").with_pyvenv_cfg_filters();
+    let context = uv_test::test_context_with_versions!(&["3.12"]).with_pyvenv_cfg_filters();
+
+    // This sets up to test for a regression where we escaped double quotes and backslashes.
+    // Windows paths don't allow double quotes and use backslash as a path separator so the path has
+    // to differ.
+    let parent_environment = context.temp_dir.child(if cfg!(windows) {
+        ".\\parent-environment"
+    } else {
+        "parent\"\\environment"
+    });
+    context
+        .venv()
+        .arg(parent_environment.path())
+        .assert()
+        .success();
+    let context = context.with_filtered_path(&parent_environment, "PARENT_VENV");
 
     let pyproject_toml = context.temp_dir.child("pyproject.toml");
     pyproject_toml.write_str(indoc! { r#"
@@ -1633,7 +1706,12 @@ fn run_with_pyvenv_cfg_file() -> Result<()> {
        "#
     })?;
 
-    uv_snapshot!(context.filters(), context.run().arg("--with").arg("iniconfig").arg("main.py"), @"
+    uv_snapshot!(context.filters(), context.run()
+        .env(EnvVars::UV_PROJECT_ENVIRONMENT, parent_environment.path())
+        .env(EnvVars::VIRTUAL_ENV, parent_environment.path())
+        .arg("--with")
+        .arg("iniconfig")
+        .arg("main.py"), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -1642,7 +1720,7 @@ fn run_with_pyvenv_cfg_file() -> Result<()> {
     uv = [UV_VERSION]
     version_info = 3.12.[X]
     include-system-site-packages = false
-    extends-environment = [PARENT_VENV]
+    extends-environment = [PARENT_VENV]/
 
 
     ----- stderr -----

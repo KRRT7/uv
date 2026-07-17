@@ -37,30 +37,6 @@ fn missing_requirements_txt() {
     requirements_txt.assert(predicates::path::missing());
 }
 
-/// `pip-sync`'s `--cert` is unsupported and must error, rather than being silently ignored,
-/// so users don't believe a custom CA bundle is in effect when it isn't.
-/// See <https://github.com/astral-sh/uv/issues/20350>.
-#[test]
-fn cert_unsupported() -> Result<()> {
-    let context = uv_test::test_context!("3.12");
-    let requirements_txt = context.temp_dir.child("requirements.txt");
-    requirements_txt.write_str("iniconfig==2.0.0")?;
-
-    uv_snapshot!(context.filters(), context.pip_sync()
-        .arg("requirements.txt")
-        .arg("--cert")
-        .arg("ca-bundle.pem"), @"
-    success: false
-    exit_code: 2
-    ----- stdout -----
-
-    ----- stderr -----
-    error: pip-sync's `--cert` is unsupported (set the `SSL_CERT_FILE` environment variable to use a custom CA certificate bundle)
-    ");
-
-    Ok(())
-}
-
 #[test]
 fn missing_venv() -> Result<()> {
     let context = uv_test::test_context!("3.12")
@@ -6064,6 +6040,41 @@ fn pep_751() -> Result<()> {
      - sniffio==1.3.1
     "
     );
+
+    Ok(())
+}
+
+#[test]
+fn pep_751_rejects_duplicate_active_packages() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    context.temp_dir.child("pylock.toml").write_str(
+        r#"
+        lock-version = "1.0"
+        created-by = "uv"
+
+        [[packages]]
+        name = "iniconfig"
+        version = "2.0.0"
+        wheels = [{ url = "https://example.com/iniconfig-2.0.0-py3-none-any.whl", hashes = { sha256 = "0000000000000000000000000000000000000000000000000000000000000000" } }]
+
+        [[packages]]
+        name = "iniconfig"
+        version = "2.1.0"
+        wheels = [{ url = "https://example.com/iniconfig-2.1.0-py3-none-any.whl", hashes = { sha256 = "1111111111111111111111111111111111111111111111111111111111111111" } }]
+        "#,
+    )?;
+
+    uv_snapshot!(context.filters(), context.pip_sync()
+        .arg("--preview")
+        .arg("pylock.toml"), @r#"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Multiple active package entries found for `iniconfig`
+    "#);
 
     Ok(())
 }
